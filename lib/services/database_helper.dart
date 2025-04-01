@@ -17,8 +17,14 @@ class DatabaseHelper {
   // --- Constants ---
   static const String _prodDbName = 'flashcards.db';
   static const String _defaultTestDbName = 'test_flashcards.db';
+  // Private table names
   static const String _foldersTable = 'folders';
   static const String _flashcardsTable = 'flashcards';
+  // Public static constants for table names
+  static const String foldersTable = _foldersTable;
+  static const String flashcardsTable = _flashcardsTable;
+
+  // Column names
   static const String _colId = 'id';
   static const String _colName = 'name';
   static const String _colParentId = 'parentId';
@@ -32,13 +38,10 @@ class DatabaseHelper {
   static const String _colRepetitions = 'repetitions';
   static const String _colLastReviewed = 'lastReviewed';
   static const String _colNextReview = 'nextReview';
-  // New Column for last rating quality
   static const String _colLastRatingQuality = 'lastRatingQuality';
 
 
   static const int uncategorizedFolderIdSentinel = -999;
-
-  // Current Database Version - Incremented to 4
   static const int _currentDbVersion = 4;
 
   DatabaseHelper(this._persistenceService, {String? dbName})
@@ -71,7 +74,6 @@ class DatabaseHelper {
     }
     final String dbPath = p.join(databasesPath, dbName);
     print("Initializing database at final path: $dbPath (Version: $_currentDbVersion)");
-
     return await databaseFactory.openDatabase(
       dbPath,
       options: OpenDatabaseOptions(
@@ -104,7 +106,7 @@ class DatabaseHelper {
         $_colRepetitions INTEGER DEFAULT 0,
         $_colLastReviewed TEXT,
         $_colNextReview TEXT,
-        $_colLastRatingQuality INTEGER, -- Added new column
+        $_colLastRatingQuality INTEGER,
         FOREIGN KEY ($_colFolderId) REFERENCES $_foldersTable($_colId) ON DELETE CASCADE
       )
     ''');
@@ -113,10 +115,10 @@ class DatabaseHelper {
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     print("Upgrading database from version $oldVersion to $newVersion...");
-    if (oldVersion < 2) {
+    // Migrations v1->v2, v2->v3, v3->v4 remain the same
+    if (oldVersion < 2) { /* ... v1->v2 migration ... */
       try {
         print("Applying migration v1 -> v2 (Folders)...");
-        // ... (migration v1 -> v2 code remains the same) ...
         await db.execute('''
           CREATE TABLE IF NOT EXISTS $_foldersTable (
             $_colId INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,10 +145,9 @@ class DatabaseHelper {
         rethrow;
       }
     }
-    if (oldVersion < 3) {
+    if (oldVersion < 3) { /* ... v2->v3 migration ... */
        try {
          print("Applying migration v2 -> v3 (Spaced Repetition)...");
-         // ... (migration v2 -> v3 code remains the same) ...
          await db.transaction((txn) async {
              await _addColumnIfNotExists(txn, _flashcardsTable, _colEasinessFactor, 'REAL DEFAULT 2.5');
              await _addColumnIfNotExists(txn, _flashcardsTable, _colInterval, 'INTEGER DEFAULT 0');
@@ -160,8 +161,7 @@ class DatabaseHelper {
           rethrow;
        }
     }
-    // Add new migration step for version 4
-    if (oldVersion < 4) {
+    if (oldVersion < 4) { /* ... v3->v4 migration ... */
       try {
         print("Applying migration v3 -> v4 (Last Rating Quality)...");
         await db.transaction((txn) async {
@@ -195,31 +195,29 @@ class DatabaseHelper {
      if (_dbOpenCompleter != null && _dbOpenCompleter!.isCompleted) {
        try {
          final db = await _dbOpenCompleter!.future;
-         if (db.isOpen) {
-           await db.close();
-           print("Database closed.");
-         }
-       } catch (e) {
-         print("Error closing database: $e");
-       } finally {
-         _dbOpenCompleter = null;
-       }
+         if (db.isOpen) { await db.close(); print("Database closed."); }
+       } catch (e) { print("Error closing database: $e"); }
+       finally { _dbOpenCompleter = null; }
      }
    }
 
   // --- CRUD Operations ---
 
-  // Modified getFlashcards (no specific column selection needed as * includes all)
+  // *** MODIFIED getFlashcards to specify columns ***
   Future<List<Flashcard>> getFlashcards({int? folderId}) async {
     final db = await database;
     try {
       final List<Map<String, dynamic>> maps = await db.query(
         _flashcardsTable,
+        columns: [ // Explicitly list all columns needed by Flashcard.fromMap
+          _colId, _colQuestion, _colAnswer, _colFolderId,
+          _colEasinessFactor, _colInterval, _colRepetitions,
+          _colLastReviewed, _colNextReview, _colLastRatingQuality
+        ],
         orderBy: "$_colId ASC",
         where: folderId == null ? '$_colFolderId IS NULL' : '$_colFolderId = ?',
         whereArgs: folderId == null ? null : [folderId],
       );
-      // Flashcard.fromMap will handle the new column
       return List.generate(maps.length, (i) => Flashcard.fromMap(maps[i]));
     } catch (e) {
         print("Error fetching flashcards (folderId: $folderId): $e");
@@ -227,128 +225,62 @@ class DatabaseHelper {
     }
   }
 
+  // insertFlashcard (remains the same)
   Future<int> insertFlashcard(Flashcard flashcard) async {
     final db = await database;
-    // toMap now includes lastRatingQuality (which will be null initially)
     Map<String, dynamic> map = flashcard.toMap()..remove(_colId);
-    try {
-      return await db.insert(
-        _flashcardsTable,
-        map,
-        conflictAlgorithm: ConflictAlgorithm.abort
-      );
-    } catch (e) {
-       print("Error inserting flashcard (${flashcard.question}): $e");
-       throw Exception('Failed to save flashcard: $e');
-    }
+    try { return await db.insert(_flashcardsTable, map, conflictAlgorithm: ConflictAlgorithm.abort); }
+    catch (e) { print("Error inserting flashcard (${flashcard.question}): $e"); throw Exception('Failed to save flashcard: $e'); }
   }
 
+  // updateFlashcard (remains the same)
   Future<int> updateFlashcard(Flashcard flashcard) async {
     final db = await database;
     ArgumentError.checkNotNull(flashcard.id, 'flashcard.id cannot be null for update');
-    try {
-      return await db.update(
-        _flashcardsTable,
-        flashcard.toMap(), // toMap now includes SR fields and lastRatingQuality
-        where: '$_colId = ?',
-        whereArgs: [flashcard.id],
-      );
-    } catch (e) {
-        print("Error updating flashcard (ID: ${flashcard.id}): $e");
-        throw Exception('Failed to update flashcard: $e');
-    }
+    try { return await db.update(_flashcardsTable, flashcard.toMap(), where: '$_colId = ?', whereArgs: [flashcard.id]); }
+    catch (e) { print("Error updating flashcard (ID: ${flashcard.id}): $e"); throw Exception('Failed to update flashcard: $e'); }
   }
 
+  // deleteFlashcard (remains the same)
   Future<int> deleteFlashcard(int id) async {
-    final db = await database;
-    int affectedRows = 0;
+    final db = await database; int affectedRows = 0;
     try {
-      affectedRows = await db.delete(
-        _flashcardsTable,
-        where: '$_colId = ?',
-        whereArgs: [id],
-      );
-      if (affectedRows > 0) {
-        await _persistenceService.clearChecklistState(id);
-        print("Deleted flashcard (ID: $id) and cleared its checklist state.");
-      } else {
-         print("Warning: Attempted to delete non-existent flashcard (ID: $id).");
-      }
-    } catch (e) {
-      print("Error deleting flashcard (ID: $id): $e");
-      throw Exception('Failed to delete flashcard: $e');
-    }
+      affectedRows = await db.delete(_flashcardsTable, where: '$_colId = ?', whereArgs: [id]);
+      if (affectedRows > 0) { await _persistenceService.clearChecklistState(id); print("Deleted flashcard (ID: $id) and cleared its checklist state."); }
+      else { print("Warning: Attempted to delete non-existent flashcard (ID: $id)."); }
+    } catch (e) { print("Error deleting flashcard (ID: $id): $e"); throw Exception('Failed to delete flashcard: $e'); }
     return affectedRows;
   }
 
+  // moveFlashcards (remains the same)
   Future<void> moveFlashcards(List<int> cardIds, int? newFolderId) async {
-    if (cardIds.isEmpty) return;
-    final db = await database;
+    if (cardIds.isEmpty) return; final db = await database;
     try {
       await db.transaction((txn) async {
         String placeholders = List.filled(cardIds.length, '?').join(',');
-        await txn.update(
-          _flashcardsTable,
-          {_colFolderId: newFolderId},
-          where: '$_colId IN ($placeholders)',
-          whereArgs: cardIds,
-        );
+        await txn.update(_flashcardsTable, {_colFolderId: newFolderId}, where: '$_colId IN ($placeholders)', whereArgs: cardIds);
       });
       print("Moved ${cardIds.length} flashcards to folder ID: $newFolderId");
-    } catch (e) {
-        print("Error moving ${cardIds.length} flashcards to folder ID $newFolderId: $e");
-        throw Exception('Failed to move flashcards: $e');
-    }
+    } catch (e) { print("Error moving ${cardIds.length} flashcards to folder ID $newFolderId: $e"); throw Exception('Failed to move flashcards: $e'); }
   }
 
+  // copyFlashcards (remains the same)
   Future<void> copyFlashcards(List<int> cardIds, int? destinationFolderId) async {
-    if (cardIds.isEmpty) return;
-    final db = await database;
+    if (cardIds.isEmpty) return; final db = await database;
     try {
       String placeholders = List.filled(cardIds.length, '?').join(',');
-      final List<Map<String, dynamic>> originalMaps = await db.query(
-        _flashcardsTable,
-        where: '$_colId IN ($placeholders)',
-        whereArgs: cardIds,
-      );
-
-      if (originalMaps.isEmpty) {
-          print("Warning: No flashcards found to copy for IDs: $cardIds");
-          return;
-      }
-
+      final List<Map<String, dynamic>> originalMaps = await db.query(_flashcardsTable, where: '$_colId IN ($placeholders)', whereArgs: cardIds);
+      if (originalMaps.isEmpty) { print("Warning: No flashcards found to copy for IDs: $cardIds"); return; }
       final List<Flashcard> originalCards = List.generate(originalMaps.length, (i) => Flashcard.fromMap(originalMaps[i]));
-
-      final List<Flashcard> copiedCards = originalCards.map((original) {
-        // Reset SR data and last rating quality for the copy
-        return Flashcard(
-          question: original.question,
-          answer: original.answer,
-          folderId: destinationFolderId,
-          easinessFactor: 2.5,
-          interval: 0,
-          repetitions: 0,
-          lastReviewed: null,
-          nextReview: null,
-          lastRatingQuality: null, // Ensure copy starts fresh
-        );
-      }).toList();
-
-      await db.transaction((txn) async {
-        for (var card in copiedCards) {
-          await txn.insert(_flashcardsTable, card.toMap()..remove(_colId), conflictAlgorithm: ConflictAlgorithm.abort);
-        }
-      });
+      final List<Flashcard> copiedCards = originalCards.map((original) => Flashcard( question: original.question, answer: original.answer, folderId: destinationFolderId, easinessFactor: 2.5, interval: 0, repetitions: 0, lastReviewed: null, nextReview: null, lastRatingQuality: null )).toList();
+      await db.transaction((txn) async { for (var card in copiedCards) { await txn.insert(_flashcardsTable, card.toMap()..remove(_colId), conflictAlgorithm: ConflictAlgorithm.abort); } });
       print("Copied ${copiedCards.length} flashcards to folder ID: $destinationFolderId");
-
-    } catch (e) {
-       print("Error copying flashcards (IDs: $cardIds) to folder ID $destinationFolderId: $e");
-       throw Exception('Failed to copy flashcards: $e');
-    }
+    } catch (e) { print("Error copying flashcards (IDs: $cardIds) to folder ID $destinationFolderId: $e"); throw Exception('Failed to copy flashcards: $e'); }
   }
 
-  // --- Folder CRUD (Unchanged) ---
-  Future<List<Folder>> getFolders({int? parentId}) async { /* ... existing code ... */
+  // Folder CRUD (getFolders, getAllFolders, getFolderById, getFolderPath, insertFolder, updateFolder, deleteFolder)
+  // remain the same
+  Future<List<Folder>> getFolders({int? parentId}) async { /* ... */
     final db = await database;
     try {
       final List<Map<String, dynamic>> maps = await db.query(
@@ -363,7 +295,7 @@ class DatabaseHelper {
        throw Exception('Failed to load folders: $e');
     }
   }
-  Future<List<Folder>> getAllFolders() async { /* ... existing code ... */
+  Future<List<Folder>> getAllFolders() async { /* ... */
     final db = await database;
     try {
       final List<Map<String, dynamic>> maps = await db.query(
@@ -376,7 +308,7 @@ class DatabaseHelper {
        throw Exception('Failed to load all folders: $e');
     }
    }
-  Future<Folder?> getFolderById(int folderId) async { /* ... existing code ... */
+  Future<Folder?> getFolderById(int folderId) async { /* ... */
     final db = await database;
     try {
       final List<Map<String, dynamic>> maps = await db.query(
@@ -394,7 +326,7 @@ class DatabaseHelper {
        throw Exception('Failed to load folder: $e');
     }
    }
-  Future<List<Folder>> getFolderPath(int? folderId) async { /* ... existing code ... */
+  Future<List<Folder>> getFolderPath(int? folderId) async { /* ... */
     if (folderId == null) return [];
     final List<Folder> path = [];
     int? currentId = folderId;
@@ -415,7 +347,7 @@ class DatabaseHelper {
        throw Exception('Failed to retrieve folder path: $e');
     }
   }
-  Future<int> insertFolder(Folder folder) async { /* ... existing code ... */
+  Future<int> insertFolder(Folder folder) async { /* ... */
     final db = await database;
     Map<String, dynamic> map = folder.toMap()..remove(_colId);
     try {
@@ -425,7 +357,7 @@ class DatabaseHelper {
        throw Exception('Failed to save folder: $e');
     }
   }
-  Future<int> updateFolder(Folder folder) async { /* ... existing code ... */
+  Future<int> updateFolder(Folder folder) async { /* ... */
     final db = await database;
     ArgumentError.checkNotNull(folder.id, 'folder.id cannot be null for update');
     try {
@@ -440,7 +372,7 @@ class DatabaseHelper {
         throw Exception('Failed to update folder: $e');
     }
   }
-  Future<int> deleteFolder(int id) async { /* ... existing code ... */
+  Future<int> deleteFolder(int id) async { /* ... */
     final db = await database;
     try {
       int affectedRows = await db.delete(
@@ -460,58 +392,45 @@ class DatabaseHelper {
     }
   }
 
-  // --- Spaced Repetition Methods ---
-
-  // Modified updateFlashcardReviewData
-  /// Updates the spaced repetition data and last rating quality for a specific flashcard.
-  Future<int> updateFlashcardReviewData(int cardId, {
+  // SR Methods (updateFlashcardReviewData, getDueFlashcards, _buildFolderFilter)
+  // remain the same
+  Future<int> updateFlashcardReviewData(int cardId, { /* ... */
     required double easinessFactor,
     required int interval,
     required int repetitions,
-    required DateTime? lastReviewed, // Nullable in case SR resets
-    required DateTime? nextReview,   // Nullable in case SR resets
-    required int? lastRatingQuality, // Added: Quality rating (0-5) submitted
+    required DateTime? lastReviewed,
+    required DateTime? nextReview,
+    required int? lastRatingQuality,
   }) async {
     final db = await database;
     try {
       final Map<String, dynamic> dataToUpdate = {
-        _colEasinessFactor: easinessFactor,
-        _colInterval: interval,
-        _colRepetitions: repetitions,
-        _colLastReviewed: lastReviewed?.toIso8601String(), // Store as ISO string or null
-        _colNextReview: nextReview?.toIso8601String(),     // Store as ISO string or null
-        _colLastRatingQuality: lastRatingQuality,           // Store the rating quality
+        _colEasinessFactor: easinessFactor, _colInterval: interval, _colRepetitions: repetitions,
+        _colLastReviewed: lastReviewed?.toIso8601String(), _colNextReview: nextReview?.toIso8601String(),
+        _colLastRatingQuality: lastRatingQuality,
       };
-
-      print("Updating SR data for card ID $cardId: $dataToUpdate"); // Debug log
-
-      return await db.update(
-        _flashcardsTable,
-        dataToUpdate,
-        where: '$_colId = ?',
-        whereArgs: [cardId],
-      );
-    } catch (e) {
-      print("Error updating SR data for card ID $cardId: $e");
-      throw Exception('Failed to update review data: $e');
-    }
+      print("Updating SR data for card ID $cardId: $dataToUpdate");
+      return await db.update(_flashcardsTable, dataToUpdate, where: '$_colId = ?', whereArgs: [cardId]);
+    } catch (e) { print("Error updating SR data for card ID $cardId: $e"); throw Exception('Failed to update review data: $e'); }
   }
 
-  // Modified getDueFlashcards (no specific column selection needed)
-  /// Fetches flashcards from a specific folder (or uncategorized)
-  /// that are due for review (nextReview <= now).
+  // *** MODIFIED getDueFlashcards to specify columns ***
   Future<List<Flashcard>> getDueFlashcards({int? folderId, required DateTime now}) async {
     final db = await database;
     try {
       final String nowString = now.toIso8601String();
       final List<Map<String, dynamic>> maps = await db.query(
         _flashcardsTable,
+         columns: [ // Explicitly list all columns needed by Flashcard.fromMap
+          _colId, _colQuestion, _colAnswer, _colFolderId,
+          _colEasinessFactor, _colInterval, _colRepetitions,
+          _colLastReviewed, _colNextReview, _colLastRatingQuality
+        ],
         where: '${_buildFolderFilter(folderId)} AND ($_colNextReview IS NOT NULL AND $_colNextReview <= ?)',
         whereArgs: folderId == null ? [nowString] : [folderId, nowString],
         orderBy: "$_colNextReview ASC",
       );
-       print("Found ${maps.length} due cards for folder $folderId at $nowString"); // Debug log
-      // Flashcard.fromMap will handle the new column
+       print("Found ${maps.length} due cards for folder $folderId at $nowString");
       return List.generate(maps.length, (i) => Flashcard.fromMap(maps[i]));
     } catch (e) {
       print("Error fetching due flashcards (folderId: $folderId): $e");
@@ -519,9 +438,8 @@ class DatabaseHelper {
     }
   }
 
-  /// Helper to build the folder part of the WHERE clause.
   String _buildFolderFilter(int? folderId) {
      return folderId == null ? '$_colFolderId IS NULL' : '$_colFolderId = ?';
   }
 
-}
+} // End of DatabaseHelper class
