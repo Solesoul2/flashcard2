@@ -5,9 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 // Import models and widgets
 import '../models/folder.dart';
 import '../models/flashcard.dart';
-// *** MODIFIED: Import InteractiveStudyCard correctly ***
+// Import InteractiveStudyCard correctly
 import '../widgets/interactive_study_card.dart';
-// *** ADDED: Import needed structures for dummy data ***
+// Import needed structures for dummy data (still needed for ParsedAnswerLine)
 import '../providers/study_notifier.dart' show ParsedAnswerLine, AnswerLineType;
 // Import the actual ASYNCHRONOUS notifier provider
 import '../providers/browse_notifier.dart';
@@ -85,7 +85,7 @@ class _BrowsePageState extends ConsumerState<BrowsePage> {
             return Center( child: Padding( padding: const EdgeInsets.all(20.0), child: Text( 'This folder has no flashcards to browse.', textAlign: TextAlign.center, style: theme.textTheme.titleMedium?.copyWith(color: Colors.grey[600]), ), ), );
           }
 
-          // --- Display PageView for Browse ---
+          // Display PageView for Browse
           return PageView.builder(
             controller: _pageController,
             itemCount: cards.length,
@@ -93,7 +93,7 @@ class _BrowsePageState extends ConsumerState<BrowsePage> {
               if (index >= cards.length) return const SizedBox.shrink();
               final card = cards[index];
 
-              // *** MODIFIED: Parameters passed to InteractiveStudyCard ***
+              // *** MODIFIED: Pass settings parameters to InteractiveStudyCard ***
               return InteractiveStudyCard(
                 key: ValueKey('browse_card_${card.id}_$index'),
                 flashcard: card,
@@ -103,22 +103,25 @@ class _BrowsePageState extends ConsumerState<BrowsePage> {
                 totalCardCount: cards.length,
                 isAnswerShown: true, // Always show answer in browse mode
 
-                // Provide the new parameters:
-                // For browse mode, create a simple list with just the answer text
+                // Provide the ordered answer lines (simple for browse)
                 orderedAnswerLines: [
                    ParsedAnswerLine(type: AnswerLineType.text, textContent: card.answer)
                 ],
                 // Checklist state is not interactive here, pass empty list
                 checklistItemsState: const [],
 
-                // Removed old parameters:
-                // checklistItems: const [], // REMOVED
-                // answerMarkdownContent: card.answer, // REMOVED
+                // --- NEW: Provide default values for settings ---
+                // Setting these to false ensures all content is immediately visible
+                // in browse mode, consistent with isAnswerShown being true.
+                setting1Active: false,
+                setting2Active: false,
+                // --- End NEW ---
 
-                // Callbacks (unchanged functionality, just wiring)
+                // Callbacks
                 onChecklistChanged: (itemIndex, isChecked) { /* No-op in browse */ },
                 onRatingColorCalculated: (id, color) { /* No-op in browse */ },
                 onDelete: () => _handleDeleteCard(context, ref, card),
+                // onEditComplete might be needed if editing is added to browse mode later
               );
               // *** END MODIFICATION ***
             },

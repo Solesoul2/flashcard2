@@ -7,12 +7,13 @@ import '../models/flashcard.dart';
 import '../models/folder.dart';
 // Import the new state structures from the notifier
 import '../providers/study_notifier.dart';
-// Import InteractiveStudyCard and ChecklistItem (though ChecklistItem might not be directly needed here)
+// Import InteractiveStudyCard and ChecklistItem
 import '../widgets/interactive_study_card.dart';
 import '../utils/helpers.dart'; // Import showConfirmationDialog
+// --- NEW: Import StudySettingsPage ---
+import 'study_settings_page.dart';
 
 /// Provides the study interface using Riverpod for state management.
-/// Navigation is handled by buttons ("Skip", "Submit Score") instead of swipes.
 class StudyPage extends ConsumerStatefulWidget {
   final Folder folder; // The folder being studied
 
@@ -24,7 +25,6 @@ class StudyPage extends ConsumerStatefulWidget {
 
 class _StudyPageState extends ConsumerState<StudyPage> {
 
-  // Color constants remain the same
   static const Color _zeroScoreColor = InteractiveStudyCard.zeroScoreColor;
   static const Color _notRatedColor = InteractiveStudyCard.notRatedColor;
 
@@ -38,18 +38,26 @@ class _StudyPageState extends ConsumerState<StudyPage> {
     super.dispose();
   }
 
+  // --- NEW: Navigation to Settings ---
+  void _navigateToSettings(BuildContext context) {
+     Navigator.push(
+       context,
+       MaterialPageRoute(
+         builder: (_) => StudySettingsPage(folderId: widget.folder.id),
+       ),
+     );
+   }
+  // --- End NEW ---
+
   // Delete confirmation dialog logic (remains the same)
   Future<void> _handleDeleteCard(BuildContext context, Flashcard cardToDelete) async {
     if (cardToDelete.id == null) return;
     final confirm = await showConfirmationDialog( context: context, title: const Text('Confirm Delete'), content: const Text('Delete this flashcard permanently?'), confirmActionText: 'Delete', isDestructiveAction: true );
     if (confirm == true && context.mounted) {
       try {
-        // Use ref.read for actions
         await ref.read(studyProvider(widget.folder.id).notifier).deleteCard(cardToDelete);
-        // Show feedback only if still mounted after async operation
         if (context.mounted) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Flashcard deleted.'))); }
       } catch (e) {
-        // Show feedback only if still mounted after async operation
         if (context.mounted) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error deleting card: $e'), backgroundColor: Colors.red)); }
       }
     }
@@ -62,49 +70,56 @@ class _StudyPageState extends ConsumerState<StudyPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // Watch the provider state
     final studyStateAsync = ref.watch(studyProvider(widget.folder.id));
-
-    // Determine AppBar Title safely using valueOrNull
     final String appBarTitle = "Study: ${studyStateAsync.valueOrNull?.folderPath.lastOrNull?.name ?? widget.folder.name}";
 
     return Scaffold(
-      appBar: AppBar(title: Text(appBarTitle)),
+      appBar: AppBar(
+        title: Text(appBarTitle),
+        // --- NEW: Add Settings Button ---
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Study Settings',
+            onPressed: () => _navigateToSettings(context),
+          ),
+        ],
+        // --- End NEW ---
+      ),
       body: studyStateAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (err, stack) => Center( /* Error UI remains the same */
           child: Padding( padding: const EdgeInsets.all(16.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.error_outline, color: theme.colorScheme.error, size: 48), const SizedBox(height: 16), Text('Error loading study session:', style: theme.textTheme.titleLarge), const SizedBox(height: 8), Text('$err', style: TextStyle(color: theme.colorScheme.error), textAlign: TextAlign.center), const SizedBox(height: 24), ElevatedButton.icon( icon: const Icon(Icons.refresh), label: const Text('Retry'), onPressed: () => ref.invalidate(studyProvider(widget.folder.id)), ) ], ), ),
         ),
         data: (studyData) {
-          // Handle Session Complete state
-          if (studyData.sessionComplete) { /* Session Complete UI remains the same */
+          // Handle Session Complete state (remains the same)
+          if (studyData.sessionComplete) {
               return Center( child: Padding( padding: const EdgeInsets.all(20.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.check_circle_outline, color: theme.colorScheme.primary, size: 64), const SizedBox(height: 24), Text( 'Study session complete!', style: theme.textTheme.headlineSmall, textAlign: TextAlign.center, ), const SizedBox(height: 16), Text( 'You have reviewed all due cards for this session.', style: theme.textTheme.bodyLarge, textAlign: TextAlign.center, ), const SizedBox(height: 32), ElevatedButton.icon( icon: const Icon(Icons.arrow_back), label: const Text('Go Back'), onPressed: () { if (Navigator.canPop(context)) { Navigator.pop(context); } }, ) ], ) ) );
           }
-          // Handle No Cards state
-          if (studyData.cards.isEmpty) { /* No Cards UI remains the same */
+          // Handle No Cards state (remains the same)
+          if (studyData.cards.isEmpty) {
             return Center( child: Padding( padding: const EdgeInsets.all(20.0), child: Text( 'This folder has no flashcards to study.\nAdd some cards first, or go back.', textAlign: TextAlign.center, style: theme.textTheme.titleMedium?.copyWith(color: Colors.grey[600]), ), ) );
           }
 
           final int currentIndex = studyData.currentPageIndex;
-          // Handle Invalid Index state (defensive check)
-          if (currentIndex < 0 || currentIndex >= studyData.cards.length) { /* Invalid Index UI remains the same */
+          // Handle Invalid Index state (remains the same)
+          if (currentIndex < 0 || currentIndex >= studyData.cards.length) {
              print("Error: Invalid current index ($currentIndex) despite session not being complete.");
              return Center( child: Padding( padding: const EdgeInsets.all(16.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.error_outline, color: theme.colorScheme.error, size: 48), const SizedBox(height: 16), Text('Internal Error: Invalid card index.', style: theme.textTheme.titleLarge), const SizedBox(height: 24), ElevatedButton.icon( icon: const Icon(Icons.arrow_back), label: const Text('Go Back'), onPressed: () { if (Navigator.canPop(context)) { Navigator.pop(context); } }, ) ], ), ), );
           }
 
-          // --- Get Data from State ---
+          // Get Data from State
           final Flashcard currentCard = studyData.cards[currentIndex];
           final bool isCurrentAnswerShown = studyData.isCurrentAnswerShown;
-          // *** Get the correct state properties based on the updated StudyStateData ***
           final List<ParsedAnswerLine> currentOrderedAnswerLines = studyData.currentOrderedAnswerLines;
           final List<ChecklistItem> currentChecklistItemsState = studyData.currentChecklistItems;
-          // *** End state property changes ***
-
-          final Color liveRatingColor = studyData.currentCardRatingColor == const Color(0xFFbdbdbd) /* Grey sentinel */
-                                        ? _notRatedColor
-                                        : studyData.currentCardRatingColor;
+          final Color liveRatingColor = studyData.currentCardRatingColor == const Color(0xFFbdbdbd) ? _notRatedColor : studyData.currentCardRatingColor;
           final int? lastQuality = studyData.currentCardLastRatingQuality;
           final bool canPressSubmit = isCurrentAnswerShown;
+          // --- NEW: Get Settings from State ---
+          final bool setting1Active = studyData.setting1HideUnmarkedTextWithCheckboxesActive;
+          final bool setting2Active = studyData.setting2ShowPreviouslyCheckedItemsActive;
+          // --- End NEW ---
 
           // Color calculation logic remains the same
           Color finalCardColor; bool lastRatingWasZero = lastQuality != null && lastQuality < 3; if (liveRatingColor == _notRatedColor && lastRatingWasZero) { finalCardColor = _zeroScoreColor; } else if (liveRatingColor == _notRatedColor && lastQuality == null) { finalCardColor = _notRatedColor; } else { finalCardColor = liveRatingColor; }
@@ -112,54 +127,48 @@ class _StudyPageState extends ConsumerState<StudyPage> {
           final bool useWhiteTextOnSubmit = submitButtonBackgroundColor.computeLuminance() < 0.5;
           final Color submitButtonForegroundColor = !canPressSubmit ? theme.colorScheme.onSurface.withOpacity(0.38) : useWhiteTextOnSubmit ? Colors.white : Colors.black87;
 
-
           // Build Reveal/Hide Button (logic remains the same)
           Widget revealHideButton;
           if (isCurrentAnswerShown) { revealHideButton = TextButton( onPressed: () => ref.read(studyProvider(widget.folder.id).notifier).toggleAnswerVisibility(), style: TextButton.styleFrom( foregroundColor: _notRatedColor, minimumSize: const Size(double.infinity, 48), padding: const EdgeInsets.symmetric(vertical: 12.0), shape: RoundedRectangleBorder( side: BorderSide(color: theme.colorScheme.outline.withOpacity(0.3)), borderRadius: BorderRadius.circular(8.0) ) ), child: const Icon(Icons.keyboard_arrow_up), ); }
           else { final bool useWhiteTextOnReveal = finalCardColor.computeLuminance() < 0.5; final Color revealFgColor = useWhiteTextOnReveal ? Colors.white : Colors.black87; revealHideButton = ElevatedButton( onPressed: () => ref.read(studyProvider(widget.folder.id).notifier).toggleAnswerVisibility(), style: ElevatedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 12.0), backgroundColor: finalCardColor, foregroundColor: revealFgColor, textStyle: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.bold) ), child: const Text('REVEAL ANSWER'), ); }
 
-
           return Column(
             children: [
               Expanded( // InteractiveStudyCard
                 child: InteractiveStudyCard(
-                  // Using ValueKey with card ID and index ensures widget rebuilds when card changes
                   key: ValueKey('study_card_${currentCard.id}_$currentIndex'),
                   flashcard: currentCard,
                   folder: widget.folder,
                   folderPath: studyData.folderPath,
-                  currentCardIndex: currentIndex + 1, // Display 1-based index
+                  currentCardIndex: currentIndex + 1,
                   totalCardCount: studyData.cards.length,
                   isAnswerShown: isCurrentAnswerShown,
-                  // Pass the new state properties
                   orderedAnswerLines: currentOrderedAnswerLines,
                   checklistItemsState: currentChecklistItemsState,
-                  // Pass last known rating quality for initial display consistency
                   lastRatingQuality: lastQuality,
-                  // Callbacks for interaction
+                  // --- NEW: Pass Settings Down ---
+                  setting1Active: setting1Active,
+                  setting2Active: setting2Active,
+                  // --- End NEW ---
+                  // Callbacks
                   onChecklistChanged: (itemIndex, isChecked) => ref.read(studyProvider(widget.folder.id).notifier).handleChecklistChanged(itemIndex, isChecked),
                   onRatingColorCalculated: (id, color) { ref.read(studyProvider(widget.folder.id).notifier).updateRatingColor(id, color); },
                   onDelete: () => _handleDeleteCard(context, currentCard),
-                  // *** MODIFIED: Update the onEditComplete callback ***
-                  onEditComplete: () async {
+                  onEditComplete: () async { // Remains the same
                       final cardIdToRefresh = currentCard.id;
                       if (cardIdToRefresh != null) {
                          print("Edit complete detected in StudyPage, refreshing card ID: $cardIdToRefresh");
-                         // Call the new notifier method to refresh just this card's data
-                         // Use ref.read for calling actions/methods on the notifier
                          await ref.read(studyProvider(widget.folder.id).notifier).refreshSingleCard(cardIdToRefresh);
                       } else {
-                         // Fallback: Invalidate if card ID is somehow null (shouldn't happen)
                          print("Edit complete detected but card ID is null, invalidating provider as fallback.");
                          ref.invalidate(studyProvider(widget.folder.id));
                       }
                   },
-                  // *** END MODIFICATION ***
                 ),
               ),
               SafeArea( // Footer Buttons (remain the same)
                 top: false, left: false, right: false,
-                child: Padding( padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Column( crossAxisAlignment: CrossAxisAlignment.stretch, children: [ revealHideButton, const SizedBox(height: 8), Visibility( visible: isCurrentAnswerShown, maintainState: true, maintainAnimation: true, maintainSize: true, child: Row( children: [ Expanded( child: OutlinedButton( onPressed: () => _handleSkip(ref), style: OutlinedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0) ), child: const Text('SKIP'), ), ), const SizedBox(width: 8), Expanded( child: ElevatedButton( onPressed: canPressSubmit ? () => _handleSubmitScore(ref) : null, style: ElevatedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0), backgroundColor: submitButtonBackgroundColor, foregroundColor: submitButtonForegroundColor, ), child: const Text('SUBMIT SCORE'), ), ), ], ), ), if (!isCurrentAnswerShown) const SizedBox(height: 48), // Placeholder for height consistency
+                child: Padding( padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Column( crossAxisAlignment: CrossAxisAlignment.stretch, children: [ revealHideButton, const SizedBox(height: 8), Visibility( visible: isCurrentAnswerShown, maintainState: true, maintainAnimation: true, maintainSize: true, child: Row( children: [ Expanded( child: OutlinedButton( onPressed: () => _handleSkip(ref), style: OutlinedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0) ), child: const Text('SKIP'), ), ), const SizedBox(width: 8), Expanded( child: ElevatedButton( onPressed: canPressSubmit ? () => _handleSubmitScore(ref) : null, style: ElevatedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0), backgroundColor: submitButtonBackgroundColor, foregroundColor: submitButtonForegroundColor, ), child: const Text('SUBMIT SCORE'), ), ), ], ), ), if (!isCurrentAnswerShown) const SizedBox(height: 48), // Placeholder
                  ], ), ),
               ), // End SafeArea
             ],
