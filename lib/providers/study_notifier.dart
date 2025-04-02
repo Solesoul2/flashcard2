@@ -12,6 +12,7 @@ import '../providers/service_providers.dart';
 import '../widgets/interactive_study_card.dart'; // Import for ChecklistItem, color constants
 import '../services/database_helper.dart';
 import '../services/sr_calculator.dart';
+import '../services/persistence_service.dart'; // Needed for checklist state in refreshSingleCard
 
 // --- New Structures for Combined Answer Parsing ---
 enum AnswerLineType { text, checklist }
@@ -28,6 +29,19 @@ class ParsedAnswerLine {
     required this.textContent,
     this.originalChecklistIndex,
   });
+
+   @override
+   bool operator ==(Object other) =>
+       identical(this, other) ||
+       other is ParsedAnswerLine &&
+           runtimeType == other.runtimeType &&
+           type == other.type &&
+           textContent == other.textContent &&
+           originalChecklistIndex == other.originalChecklistIndex;
+
+   @override
+   int get hashCode =>
+       type.hashCode ^ textContent.hashCode ^ originalChecklistIndex.hashCode;
 }
 // --- End New Structures ---
 
@@ -40,9 +54,8 @@ class StudyStateData {
   // Holds the parsed lines in their original order for rendering
   final List<List<ParsedAnswerLine>> orderedAnswerLinesState;
   // Still holds the checklist items separately for state management (checked status)
+  // This list will now be kept sorted (checked items at the bottom) within the notifier.
   final List<List<ChecklistItem>> checklistItemsState;
-  // No longer storing separate answerMarkdownState
-  // final List<String> answerMarkdownState; // REMOVED
   final List<bool> answerShownState;
   final int currentPageIndex;
   final Color currentCardRatingColor;
@@ -52,9 +65,8 @@ class StudyStateData {
    StudyStateData({
     this.cards = const [],
     this.folderPath = const [],
-    this.orderedAnswerLinesState = const [], // ADDED
-    this.checklistItemsState = const [], // Keep for state
-    // this.answerMarkdownState = const [], // REMOVED
+    this.orderedAnswerLinesState = const [],
+    this.checklistItemsState = const [],
     this.answerShownState = const [],
     this.currentPageIndex = 0,
     Color? currentCardRatingColor,
@@ -62,10 +74,10 @@ class StudyStateData {
     this.currentCardLastRatingQuality,
   }) : currentCardRatingColor = currentCardRatingColor ?? InteractiveStudyCard.notRatedColor;
 
-  bool get isCurrentAnswerShown { /* ... remains same ... */
+  bool get isCurrentAnswerShown {
      if (!sessionComplete && cards.isNotEmpty && currentPageIndex >= 0 && currentPageIndex < answerShownState.length) { return answerShownState[currentPageIndex]; } return false;
   }
-  Flashcard? get currentCard { /* ... remains same ... */
+  Flashcard? get currentCard {
       if (!sessionComplete && cards.isNotEmpty && currentPageIndex >= 0 && currentPageIndex < cards.length) { return cards[currentPageIndex]; } return null;
     }
 
@@ -77,7 +89,7 @@ class StudyStateData {
      return [];
   }
 
-   // Get the checklist items state for the current card
+   // Get the checklist items state for the current card (already sorted by notifier)
   List<ChecklistItem> get currentChecklistItems {
      if (!sessionComplete && cards.isNotEmpty && currentPageIndex >= 0 && currentPageIndex < checklistItemsState.length) {
        return checklistItemsState[currentPageIndex];
@@ -89,9 +101,8 @@ class StudyStateData {
   StudyStateData copyWith({
     List<Flashcard>? cards,
     List<Folder>? folderPath,
-    List<List<ParsedAnswerLine>>? orderedAnswerLinesState, // ADDED
-    List<List<ChecklistItem>>? checklistItemsState, // Keep for state
-    // List<String>? answerMarkdownState, // REMOVED
+    List<List<ParsedAnswerLine>>? orderedAnswerLinesState,
+    List<List<ChecklistItem>>? checklistItemsState,
     List<bool>? answerShownState,
     int? currentPageIndex,
     Color? currentCardRatingColor,
@@ -101,9 +112,8 @@ class StudyStateData {
     return StudyStateData(
       cards: cards ?? this.cards,
       folderPath: folderPath ?? this.folderPath,
-      orderedAnswerLinesState: orderedAnswerLinesState ?? this.orderedAnswerLinesState, // ADDED
-      checklistItemsState: checklistItemsState ?? this.checklistItemsState, // Keep for state
-      // answerMarkdownState: answerMarkdownState ?? this.answerMarkdownState, // REMOVED
+      orderedAnswerLinesState: orderedAnswerLinesState ?? this.orderedAnswerLinesState,
+      checklistItemsState: checklistItemsState ?? this.checklistItemsState,
       answerShownState: answerShownState ?? this.answerShownState,
       currentPageIndex: currentPageIndex ?? this.currentPageIndex,
       currentCardRatingColor: currentCardRatingColor ?? this.currentCardRatingColor,
@@ -113,6 +123,34 @@ class StudyStateData {
           : this.currentCardLastRatingQuality,
     );
   }
+
+  // Add == and hashCode for potential state comparison optimizations
+   @override
+   bool operator ==(Object other) =>
+       identical(this, other) ||
+       other is StudyStateData &&
+           runtimeType == other.runtimeType &&
+           listEquals(cards, other.cards) &&
+           listEquals(folderPath, other.folderPath) &&
+           listEquals(orderedAnswerLinesState, other.orderedAnswerLinesState) && // Requires ParsedAnswerLine equality
+           listEquals(checklistItemsState, other.checklistItemsState) && // Requires ChecklistItem equality
+           listEquals(answerShownState, other.answerShownState) &&
+           currentPageIndex == other.currentPageIndex &&
+           currentCardRatingColor == other.currentCardRatingColor &&
+           sessionComplete == other.sessionComplete &&
+           currentCardLastRatingQuality == other.currentCardLastRatingQuality;
+
+   @override
+   int get hashCode =>
+       Object.hashAll(cards) ^
+       Object.hashAll(folderPath) ^
+       Object.hashAll(orderedAnswerLinesState) ^
+       Object.hashAll(checklistItemsState) ^
+       Object.hashAll(answerShownState) ^
+       currentPageIndex.hashCode ^
+       currentCardRatingColor.hashCode ^
+       sessionComplete.hashCode ^
+       currentCardLastRatingQuality.hashCode;
 }
 // --- End MODIFIED State ---
 
@@ -121,11 +159,21 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
 
   final _random = Random();
 
-  // *** MODIFIED: build method ***
+  // Helper function to sort a list of ChecklistItems (checked items last)
+  List<ChecklistItem> _sortChecklist(List<ChecklistItem> items) {
+    // Create a mutable copy before sorting
+    final sortedItems = List<ChecklistItem>.from(items);
+    sortedItems.sort((a, b) {
+      if (a.isChecked == b.isChecked) return 0; // Maintain relative order if same status
+      return a.isChecked ? 1 : -1; // Checked items go to the end (true > false)
+    });
+    return sortedItems;
+  }
+
   @override
   Future<StudyStateData> build(int? arg /* folderId */) async {
     final folderId = arg;
-    if (folderId == null) { /* ... handle null folderId ... */
+    if (folderId == null) {
         print("Warning: StudyNotifier build called with null folderId."); return StudyStateData(sessionComplete: true);
     }
 
@@ -137,34 +185,45 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
     // Fetching logic remains the same
     print("StudyNotifier Build: Fetching cards for folder $folderId...");
     List<Flashcard> rawFetchedCards = await dbHelper.getDueFlashcards(folderId: folderId, now: now);
-    if (rawFetchedCards.isEmpty) { /* ... fetch all if no due cards ... */
+    if (rawFetchedCards.isEmpty) {
         print("StudyNotifier Build: No due cards found. Fetching all cards...");
         rawFetchedCards = await dbHelper.getFlashcards(folderId: folderId);
-        if (rawFetchedCards.isNotEmpty) { rawFetchedCards.sort((a, b) { /* ... sorting ... */ final aIsNull = a.nextReview == null; final bIsNull = b.nextReview == null; if (aIsNull && !bIsNull) return -1; if (!aIsNull && bIsNull) return 1; if (aIsNull && bIsNull) return 0; if (a.nextReview == null || b.nextReview == null) return 0; return a.nextReview!.compareTo(b.nextReview!); }); }
+        if (rawFetchedCards.isNotEmpty) {
+            // Simple sort by ID for predictability if no due cards
+            rawFetchedCards.sort((a, b) => (a.id ?? 0).compareTo(b.id ?? 0));
+            // More complex sort (e.g., by nextReview, handling nulls)
+            // rawFetchedCards.sort((a, b) {
+            //    final aIsNull = a.nextReview == null; final bIsNull = b.nextReview == null;
+            //    if (aIsNull && !bIsNull) return -1; // Nulls first
+            //    if (!aIsNull && bIsNull) return 1;
+            //    if (aIsNull && bIsNull) return (a.id ?? 0).compareTo(b.id ?? 0); // If both null, sort by ID
+            //    return a.nextReview!.compareTo(b.nextReview!); // Both non-null, compare dates
+            // });
+        }
+    } else {
+        // Already sorted by nextReview ASC by getDueFlashcards
     }
     studySessionCards = rawFetchedCards;
 
-    // Log fetched cards (using updated log format)
-     if (studySessionCards.isNotEmpty) { print("StudyNotifier Build: Fetched ${studySessionCards.length} cards (first few):"); for(int i = 0; i < studySessionCards.length && i < 5; i++) { final q = studySessionCards[i].question; print("  - ID: ${studySessionCards[i].id}, LastQuality: ${studySessionCards[i].lastRatingQuality}, Q_Length: ${q.length}, Question: ${q.replaceAll('\n', '\\n')}"); } }
-     else { print("StudyNotifier Build: No cards found for folder $folderId."); }
+    // Log fetched cards
+    if (studySessionCards.isNotEmpty) { print("StudyNotifier Build: Fetched ${studySessionCards.length} cards (first few):"); for(int i = 0; i < studySessionCards.length && i < 5; i++) { final q = studySessionCards[i].question; print("  - ID: ${studySessionCards[i].id}, LastQuality: ${studySessionCards[i].lastRatingQuality}, Q_Length: ${q.length}, Question: ${q.replaceAll('\n', '\\n')}"); } }
+    else { print("StudyNotifier Build: No cards found for folder $folderId."); }
 
 
-    if (studySessionCards.isEmpty) { /* ... handle no cards ... */
+    if (studySessionCards.isEmpty) {
         print("No cards found for study session in folder $folderId."); final folderPath = await dbHelper.getFolderPath(folderId); return StudyStateData(folderPath: folderPath, sessionComplete: true);
     }
 
-    // --- MODIFIED Parsing and State Initialization ---
+    // --- Parsing and State Initialization ---
     final List<List<ParsedAnswerLine>> allOrderedLines = [];
     final List<List<ChecklistItem>> allChecklistItemsForState = [];
     final List<Map<int, bool>> loadedInitialCheckStates = [];
 
     for (final card in studySessionCards) {
-      // Parse into the new combined list structure AND separate checklist items
       final parseResult = _parseAnswerContent(card.answer);
       allOrderedLines.add(parseResult.orderedLines);
-      allChecklistItemsForState.add(parseResult.checklistItems); // Keep for state mgmt
+      allChecklistItemsForState.add(parseResult.checklistItems);
 
-      // Load persisted check states
       if (card.id != null) {
         final initialCheckState = await persistenceService.loadChecklistState(card.id);
         loadedInitialCheckStates.add(initialCheckState);
@@ -173,14 +232,15 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
       }
     }
 
-    // Apply loaded check states to the checklist items used for state management
+    // Apply loaded check states and SORT each card's checklist
     final initialChecklistStateWithPersistence = _applyInitialCheckStates(
       allChecklistItemsForState, loadedInitialCheckStates
     );
-    // --- End MODIFIED Parsing ---
+    // --- End Parsing ---
 
 
     final initialAnswerVisibility = List<bool>.filled(studySessionCards.length, false, growable: true);
+    // Use the (potentially sorted) list for initial color calculation
     final initialColor = _calculateRatingColor(initialChecklistStateWithPersistence.isNotEmpty ? initialChecklistStateWithPersistence[0] : []);
     final folderPath = await dbHelper.getFolderPath(folderId);
     final initialLastRatingQuality = studySessionCards.isNotEmpty ? studySessionCards[0].lastRatingQuality : null;
@@ -190,8 +250,9 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
     return StudyStateData(
       cards: studySessionCards,
       folderPath: folderPath,
-      orderedAnswerLinesState: allOrderedLines, // Use new combined list
-      checklistItemsState: initialChecklistStateWithPersistence, // Use state list with loaded checks
+      orderedAnswerLinesState: allOrderedLines,
+      // Store the SORTED list in the initial state
+      checklistItemsState: initialChecklistStateWithPersistence,
       answerShownState: initialAnswerVisibility,
       currentPageIndex: 0,
       currentCardRatingColor: initialColor,
@@ -200,38 +261,33 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
     );
   }
 
-  // *** MODIFIED: _parseAnswerContent ***
-  // Now returns the ordered list and the separate checklist items for state
+  // _parseAnswerContent remains the same
   ({ List<ParsedAnswerLine> orderedLines, List<ChecklistItem> checklistItems }) _parseAnswerContent(String answer) {
     final lines = answer.split('\n');
     final List<ParsedAnswerLine> ordered = [];
     final List<ChecklistItem> items = [];
-    int checklistIndex = 0; // This is the index within the checklistItems list
+    int checklistIndex = 0;
 
     for (final line in lines) {
-      // Check if line starts with "* " AFTER trimming whitespace
       final trimmedLine = line.trim();
       if (trimmedLine.startsWith('* ')) {
-        final itemText = trimmedLine.substring(2).trim(); // Get text after "* "
-        // Create the ChecklistItem for state management
+        final itemText = trimmedLine.substring(2).trim();
         final checklistItem = ChecklistItem(
-          originalIndex: checklistIndex, // Store its index within the checklistItems list
+          originalIndex: checklistIndex,
           text: itemText,
-          isChecked: false, // Initial state, will be overridden by persistence
+          isChecked: false,
         );
         items.add(checklistItem);
-        // Add to the ordered list for rendering, linking via originalChecklistIndex
         ordered.add(ParsedAnswerLine(
           type: AnswerLineType.checklist,
-          textContent: itemText, // Store text here too for convenience if needed
+          textContent: itemText,
           originalChecklistIndex: checklistIndex,
         ));
-        checklistIndex++; // Increment index for the next checklist item
+        checklistIndex++;
       } else {
-        // Add regular text line to the ordered list
         ordered.add(ParsedAnswerLine(
           type: AnswerLineType.text,
-          textContent: line, // Keep original line for rendering markdown
+          textContent: line, // Keep original line for non-checklist items
           originalChecklistIndex: null,
         ));
       }
@@ -239,74 +295,74 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
     return (orderedLines: ordered, checklistItems: items);
    }
 
-  // *** RENAMED and MODIFIED: _applyInitialCheckStates ***
-  // Applies persisted check states to the separate checklist item state list
+  // *** MODIFIED: _applyInitialCheckStates ***
+  // Applies persisted check states AND sorts the list for each card
   List<List<ChecklistItem>> _applyInitialCheckStates(
-      List<List<ChecklistItem>> allChecklistItems, // The items parsed from content
-      List<Map<int, bool>> loadedCheckStates // The states loaded from persistence
+      List<List<ChecklistItem>> allChecklistItems,
+      List<Map<int, bool>> loadedCheckStates
       ) {
      List<List<ChecklistItem>> statefulChecklists = [];
      for(int i = 0; i < allChecklistItems.length; i++) {
-         final cardItems = allChecklistItems[i]; // Items for this card
-         // Get the persisted state map {originalIndex: isChecked} for this card
+         final cardItems = allChecklistItems[i];
          final cardInitialCheckState = (i < loadedCheckStates.length) ? loadedCheckStates[i] : <int, bool>{};
          List<ChecklistItem> itemsWithState = [];
-         // Iterate through the items parsed for this card
          for(final item in cardItems) {
-           // Create a new ChecklistItem using the persisted check state or default false
            itemsWithState.add(item.copyWith(
              isChecked: cardInitialCheckState[item.originalIndex] ?? item.isChecked
            ));
          }
-         statefulChecklists.add(itemsWithState);
+         // Sort the list for this card after applying persisted state
+         statefulChecklists.add(_sortChecklist(itemsWithState));
      }
      return statefulChecklists;
    }
 
-  // _calculateRatingColor remains the same, takes List<ChecklistItem>
-  Color _calculateRatingColor(List<ChecklistItem> checklistItems) { /* ... */ if (checklistItems.isEmpty || !checklistItems.any((item) => item.isChecked)) { return InteractiveStudyCard.notRatedColor; } final totalItems = checklistItems.length; final checkedItems = checklistItems.where((item) => item.isChecked).length; final percentage = totalItems > 0 ? checkedItems / totalItems : 0.0; const List<Color> gradientColors = [ InteractiveStudyCard.zeroScoreColor, Colors.orange, Colors.amber, Color(0xFF66BB6A), Colors.blue ]; const List<double> gradientStops = [ 0.0, 0.25, 0.5, 0.75, 1.0 ]; final clampedPercentage = percentage.clamp(0.0, 1.0); for (int i = 0; i < gradientStops.length - 1; i++) { final stop1 = gradientStops[i]; final stop2 = gradientStops[i + 1]; if (clampedPercentage >= stop1 && clampedPercentage <= stop2) { final range = stop2 - stop1; final t = range == 0.0 ? 0.0 : (clampedPercentage - stop1) / range; return Color.lerp(gradientColors[i], gradientColors[i + 1], t) ?? gradientColors.last; } } return gradientColors.last; }
+  // _calculateRatingColor remains the same
+  Color _calculateRatingColor(List<ChecklistItem> checklistItems) { if (checklistItems.isEmpty || !checklistItems.any((item) => item.isChecked)) { return InteractiveStudyCard.notRatedColor; } final totalItems = checklistItems.length; final checkedItems = checklistItems.where((item) => item.isChecked).length; final percentage = totalItems > 0 ? checkedItems / totalItems : 0.0; const List<Color> gradientColors = [ InteractiveStudyCard.zeroScoreColor, Colors.orange, Colors.amber, Color(0xFF66BB6A), Colors.blue ]; const List<double> gradientStops = [ 0.0, 0.25, 0.5, 0.75, 1.0 ]; final clampedPercentage = percentage.clamp(0.0, 1.0); for (int i = 0; i < gradientStops.length - 1; i++) { final stop1 = gradientStops[i]; final stop2 = gradientStops[i + 1]; if (clampedPercentage >= stop1 && clampedPercentage <= stop2) { final range = stop2 - stop1; final t = range == 0.0 ? 0.0 : (clampedPercentage - stop1) / range; return Color.lerp(gradientColors[i], gradientColors[i + 1], t) ?? gradientColors.last; } } return gradientColors.last; }
 
-  // *** MODIFIED: Helper to advance session ***
+  // *** MODIFIED: _advanceSession ***
   void _advanceSession(StudyStateData currentState, int reviewedCardIndex) {
      if (currentState.sessionComplete) return;
-     // Make copies of state lists
      final updatedSessionCards = List<Flashcard>.from(currentState.cards);
-     final updatedOrderedLines = List<List<ParsedAnswerLine>>.from(currentState.orderedAnswerLinesState); // Copy new list
-     final updatedChecklistItems = List<List<ChecklistItem>>.from(currentState.checklistItemsState); // Copy state list
+     final updatedOrderedLines = List<List<ParsedAnswerLine>>.from(currentState.orderedAnswerLinesState);
+     final updatedChecklistItems = List<List<ChecklistItem>>.from(currentState.checklistItemsState);
      final updatedAnswerShown = List<bool>.from(currentState.answerShownState);
 
-     // Remove the reviewed card from all lists
      if (reviewedCardIndex >= 0 && reviewedCardIndex < updatedSessionCards.length) {
        updatedSessionCards.removeAt(reviewedCardIndex);
-       updatedOrderedLines.removeAt(reviewedCardIndex); // Remove from new list
-       updatedChecklistItems.removeAt(reviewedCardIndex); // Remove from state list
+       updatedOrderedLines.removeAt(reviewedCardIndex);
+       updatedChecklistItems.removeAt(reviewedCardIndex); // Remove the SORTED list for this card
        updatedAnswerShown.removeAt(reviewedCardIndex);
        print("_advanceSession: Removed card at index $reviewedCardIndex from session queue.");
      } else { print("Warning: Invalid index $reviewedCardIndex provided to _advanceSession."); }
 
-     // Check if session is complete
      if (updatedSessionCards.isEmpty) {
         print("_advanceSession: Study session queue empty. Marking session complete.");
         state = AsyncData(currentState.copyWith(
-            cards: [],
-            orderedAnswerLinesState: [], // Clear new list
-            checklistItemsState: [], // Clear state list
-            answerShownState: [],
-            currentPageIndex: 0, sessionComplete: true, currentCardLastRatingQuality: () => null ));
+            cards: [], orderedAnswerLinesState: [], checklistItemsState: [],
+            answerShownState: [], currentPageIndex: 0, sessionComplete: true,
+            currentCardLastRatingQuality: () => null ));
         return;
      }
 
-     // Determine next index
+     // Determine the next index. Usually stays the same after removal,
+     // unless the removed item was the last one.
      int nextIndex = reviewedCardIndex;
-     if (nextIndex >= updatedSessionCards.length) { nextIndex = 0; }
+     if (nextIndex >= updatedSessionCards.length) {
+         // If the removed card was the last one, wrap around to the start
+         nextIndex = 0;
+     }
+     // If it wasn't the last one, the element originally *after* the removed one
+     // is now at the `reviewedCardIndex`, so `nextIndex` remains correct.
+
 
      print("_advanceSession: Next index will be $nextIndex");
-     // Update state using the modified lists
+     // Pass the state containing the removed card's data
      _updateStateForNewIndex(
          currentState.copyWith(
              cards: updatedSessionCards,
-             orderedAnswerLinesState: updatedOrderedLines, // Pass new list
-             checklistItemsState: updatedChecklistItems, // Pass state list
+             orderedAnswerLinesState: updatedOrderedLines,
+             checklistItemsState: updatedChecklistItems, // Pass the list with removed card
              answerShownState: updatedAnswerShown
          ),
          nextIndex
@@ -316,72 +372,79 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
   // *** MODIFIED: Helper to update state for the new current card index ***
   void _updateStateForNewIndex(StudyStateData currentState, int newIndex) {
      if (currentState.sessionComplete) return;
-     if (newIndex < 0 || newIndex >= currentState.cards.length) { /* ... handle invalid index ... */ print("Warning: Attempted state update for invalid newIndex $newIndex..."); state = AsyncData(currentState.copyWith(sessionComplete: true, currentCardLastRatingQuality: () => null)); return; }
+     if (newIndex < 0 || newIndex >= currentState.cards.length) { print("Warning: Attempted state update for invalid newIndex $newIndex..."); state = AsyncData(currentState.copyWith(sessionComplete: true, currentCardLastRatingQuality: () => null)); return; }
 
-     // Reset answer shown state for the new card
      final newAnswerState = List<bool>.from(currentState.answerShownState);
-     if (newIndex < newAnswerState.length) { newAnswerState[newIndex] = false; }
-     else { print("Warning: Answer state list length mismatch in _updateStateForNewIndex."); }
+     // Always set the answer visibility to false for the new card
+     if (newIndex < newAnswerState.length) {
+        newAnswerState[newIndex] = false;
+     } else {
+         print("Warning: Answer state list length mismatch in _updateStateForNewIndex. Length: ${newAnswerState.length}, Index: $newIndex");
+         // Attempt to recover if possible, e.g., add missing entries? Or just log.
+         // For simplicity, just log for now.
+     }
 
-     // Get the checklist items STATE for the new card to calculate color
+
+     // Get the checklist items STATE for the new card (already sorted)
      final currentCardChecklistState = (newIndex >= 0 && newIndex < currentState.checklistItemsState.length)
          ? currentState.checklistItemsState[newIndex] : <ChecklistItem>[];
-     final newRatingColor = _calculateRatingColor(currentCardChecklistState); // Use state list for color calc
+     final newRatingColor = _calculateRatingColor(currentCardChecklistState);
 
-     // Get last rating quality from the Flashcard object
      final newLastRatingQuality = currentState.cards[newIndex].lastRatingQuality;
      print("_updateStateForNewIndex: Updating state for index $newIndex. Card ID: ${currentState.cards[newIndex].id}, LastQuality from state list: $newLastRatingQuality");
 
-     // Update the overall state
      state = AsyncData(currentState.copyWith(
          currentPageIndex: newIndex,
          answerShownState: newAnswerState,
+         // checklistItemsState is already updated/sorted from build or advanceSession
          currentCardRatingColor: newRatingColor,
          currentCardLastRatingQuality: () => newLastRatingQuality,
          sessionComplete: false
      ));
   }
 
-  // --- Public Methods to Modify State ---
-
   // toggleAnswerVisibility remains the same
-  void toggleAnswerVisibility() { /* ... */ state.whenData((data) { if (!data.sessionComplete && data.cards.isNotEmpty && data.currentPageIndex >= 0 && data.currentPageIndex < data.answerShownState.length) { final newAnswerState = List<bool>.from(data.answerShownState); newAnswerState[data.currentPageIndex] = !newAnswerState[data.currentPageIndex]; state = AsyncData(data.copyWith(answerShownState: newAnswerState)); } }); }
+  void toggleAnswerVisibility() { state.whenData((data) { if (!data.sessionComplete && data.cards.isNotEmpty && data.currentPageIndex >= 0 && data.currentPageIndex < data.answerShownState.length) { final newAnswerState = List<bool>.from(data.answerShownState); newAnswerState[data.currentPageIndex] = !newAnswerState[data.currentPageIndex]; state = AsyncData(data.copyWith(answerShownState: newAnswerState)); } }); }
 
   // *** MODIFIED: handleChecklistChanged ***
-  // Updates the CHECKLIST ITEM STATE list
   Future<void> handleChecklistChanged(int itemOriginalIndex, bool isChecked) async {
      final currentDataAsync = state;
      if (!currentDataAsync.hasValue || currentDataAsync.value!.sessionComplete) return;
      final data = currentDataAsync.value!;
-     // Check index against the checklistItemsState list
-     if (data.currentPageIndex < 0 || data.currentPageIndex >= data.checklistItemsState.length) {
-         print("Error: Invalid currentPageIndex ${data.currentPageIndex} in handleChecklistChanged.");
-         return;
-     }
+     final currentIndex = data.currentPageIndex; // Store current index
 
-     // --- Modify the checklistItemsState list ---
+      if (currentIndex < 0 || currentIndex >= data.checklistItemsState.length) {
+          print("Error: Invalid currentPageIndex $currentIndex in handleChecklistChanged.");
+          return;
+      }
+
+
      // Create a deep copy of the outer list and the relevant inner list
      final newChecklistItemsStateList = List<List<ChecklistItem>>.from(
          data.checklistItemsState.map((list) => List<ChecklistItem>.from(list.map((item) => item.copyWith())))
      );
-     final currentCardChecklistStateMutable = newChecklistItemsStateList[data.currentPageIndex];
-     // Find the item by its originalIndex within this card's state list
+     final currentCardChecklistStateMutable = newChecklistItemsStateList[currentIndex];
      final itemIndexInState = currentCardChecklistStateMutable.indexWhere((item) => item.originalIndex == itemOriginalIndex);
 
      if (itemIndexInState == -1) {
-         print("Error: Checklist item state with originalIndex $itemOriginalIndex not found.");
+         print("Error: Checklist item state with originalIndex $itemOriginalIndex not found for card at index $currentIndex.");
          return;
      }
-     // Update the isChecked status in the copied state list
+
+     // Update the isChecked status
      currentCardChecklistStateMutable[itemIndexInState] = currentCardChecklistStateMutable[itemIndexInState].copyWith(isChecked: isChecked);
-     // --- End modification of checklistItemsState ---
 
+     // *** Re-sort the checklist for the current card ***
+     final sortedCurrentCardChecklist = _sortChecklist(currentCardChecklistStateMutable);
+     // Replace the old list for this card with the newly sorted one
+     newChecklistItemsStateList[currentIndex] = sortedCurrentCardChecklist;
 
-     // Persist the updated check state using the modified state list
+     // Persist the state using the updated (but before sorting) map
      final cardId = data.currentCard?.id;
      if (cardId != null) {
-       // Create the map {originalIndex: isChecked} from the UPDATED state list for this card
        final Map<int, bool> stateToSave = {
+         // Build map from the potentially unsorted mutable list *before* sorting,
+         // as persistence expects originalIndex -> isChecked
          for (var item in currentCardChecklistStateMutable) item.originalIndex: item.isChecked
        };
        try {
@@ -391,25 +454,24 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
      }
 
      // Recalculate rating color based on the UPDATED state list
-     final newRatingColor = _calculateRatingColor(currentCardChecklistStateMutable);
+     final newRatingColor = _calculateRatingColor(sortedCurrentCardChecklist); // Use sorted list for color
 
-     // Update the main state with the modified checklistItemsState list and new color
+     // Update the main state with the SORTED list and new color
      state = AsyncData(data.copyWith(
-         checklistItemsState: newChecklistItemsStateList, // Use the updated state list
+         checklistItemsState: newChecklistItemsStateList, // Store the list containing the sorted sublist
          currentCardRatingColor: newRatingColor
      ));
   }
 
 
   // updateRatingColor remains the same
-  void updateRatingColor(int? reportingCardId, Color color) { /* ... */ state.whenData((data) { if (data.sessionComplete) return; final currentCard = data.currentCard; final expectedCardId = currentCard?.id; if (reportingCardId != null && expectedCardId != null && reportingCardId == expectedCardId && data.currentCardRatingColor != color) { final Color colorToSet = (color == const Color(0xFFbdbdbd)) ? InteractiveStudyCard.notRatedColor : color; state = AsyncData(data.copyWith(currentCardRatingColor: colorToSet)); } }); }
+  void updateRatingColor(int? reportingCardId, Color color) { state.whenData((data) { if (data.sessionComplete) return; final currentCard = data.currentCard; final expectedCardId = currentCard?.id; if (reportingCardId != null && expectedCardId != null && reportingCardId == expectedCardId && data.currentCardRatingColor != color) { final Color colorToSet = (color == const Color(0xFFbdbdbd)) ? InteractiveStudyCard.notRatedColor : color; state = AsyncData(data.copyWith(currentCardRatingColor: colorToSet)); } }); }
 
   // skipCard remains the same
-   void skipCard() { /* ... */ state.whenData((data) { if (data.sessionComplete) return; final currentIndex = data.currentPageIndex; final cardId = data.currentCard?.id; print("Skipping card index: $currentIndex (ID: $cardId)"); _advanceSession(data, currentIndex); }); }
+   void skipCard() { state.whenData((data) { if (data.sessionComplete) return; final currentIndex = data.currentPageIndex; final cardId = data.currentCard?.id; print("Skipping card index: $currentIndex (ID: $cardId)"); _advanceSession(data, currentIndex); }); }
 
 
   // *** MODIFIED: rateCard ***
-  // Now calculates quality based on the CHECKLIST ITEM STATE list
   Future<void> rateCard() async {
       final currentDataAsync = state;
       if (!currentDataAsync.hasValue || currentDataAsync.value!.sessionComplete) return;
@@ -417,53 +479,170 @@ class StudyNotifier extends FamilyAsyncNotifier<StudyStateData, int?> {
       final currentCard = data.currentCard;
       final currentIndex = data.currentPageIndex;
 
-      if (currentCard?.id == null) { /* ... handle missing ID ... */ print("Error: Cannot rate card without an ID. Skipping."); _advanceSession(data, currentIndex); return; }
+      if (currentCard?.id == null) { print("Error: Cannot rate card without an ID. Skipping."); _advanceSession(data, currentIndex); return; }
       final cardId = currentCard!.id!;
 
-      // --- Calculate Quality based on checklistItemsState ---
+      // Quality calculation uses the currentChecklistItems getter (which returns the sorted list)
       int quality;
-      // Get the STATE list for the current card
-      final currentCardChecklistStateItems = data.currentChecklistItems;
-      if (currentCardChecklistStateItems.isEmpty) {
-          quality = 3; // Default if no checklist items exist in state
-          print("Rating card ID $cardId (no checklist items in state): Default Quality=$quality");
+      final currentCardChecklistStateItems = data.currentChecklistItems; // Already sorted
+      if (currentCardChecklistStateItems.isEmpty) { quality = 3; print("Rating card ID $cardId (no checklist items in state): Default Quality=$quality");
       } else {
           final totalItems = currentCardChecklistStateItems.length;
           final checkedItems = currentCardChecklistStateItems.where((item) => item.isChecked).length;
           final percentage = totalItems > 0 ? (checkedItems / totalItems) : 0.0;
-          // Quality calculation logic remains same, just uses state list
           if (percentage == 1.0) { quality = 5; } else if (percentage >= 0.8) { quality = 4; } else if (percentage >= 0.5) { quality = 3; } else if (percentage >= 0.2) { quality = 2; } else if (percentage > 0) { quality = 1; } else { quality = 0; }
           print("Rating card ID $cardId (checklist state ${checkedItems}/${totalItems} = ${percentage.toStringAsFixed(2)}): Calculated Quality=$quality");
       }
-      // --- End Quality Calculation ---
 
       // SR Calculation remains the same
       final SRResult srResult = SRCalculator.calculate( quality: quality, previousEasinessFactor: currentCard.easinessFactor, previousInterval: currentCard.interval, previousRepetitions: currentCard.repetitions );
-      DateTime now = DateTime.now(); int calculatedIntervalDays = max(0, srResult.interval); DateTime nextReviewDate = now.add(Duration(days: calculatedIntervalDays)).add(const Duration(seconds: 1));
+      DateTime now = DateTime.now(); int calculatedIntervalDays = max(0, srResult.interval); DateTime nextReviewDate = now.add(Duration(days: calculatedIntervalDays)).add(const Duration(seconds: 1)); // Add 1 sec to ensure it's after 'now'
 
-      // Persist and Update State (logic remains same, uses logging added previously)
+      // Persist and Update State
       try {
           final dbHelper = await ref.read(databaseHelperProvider.future);
           await dbHelper.updateFlashcardReviewData( cardId, easinessFactor: srResult.easinessFactor, interval: srResult.interval, repetitions: srResult.repetitions, lastReviewed: now, nextReview: nextReviewDate, lastRatingQuality: quality );
           print("  Successfully persisted SR data & Last Quality ($quality) for card ID $cardId: $srResult, Next Review: ${nextReviewDate.toIso8601String()}");
 
+          // Important: Update the card within the *current state* before advancing
           final updatedCards = List<Flashcard>.from(data.cards);
           final cardIndexInList = updatedCards.indexWhere((c) => c.id == cardId);
           if (cardIndexInList != -1) {
               Flashcard originalCardFromState = updatedCards[cardIndexInList];
-              print("--- Question Check Before copyWith ---"); print("Card ID: $cardId"); print("Original Question from State List: ${originalCardFromState.question}"); // Keep this log
-              Flashcard cardJustRated = originalCardFromState.copyWith( easinessFactor: srResult.easinessFactor, interval: srResult.interval, repetitions: srResult.repetitions, lastReviewed: () => now, nextReview: () => nextReviewDate, lastRatingQuality: () => quality );
-              print("--- Question Check After copyWith ---"); print("Card ID: $cardId"); print("Question in new 'cardJustRated' object: ${cardJustRated.question}"); // Keep this log
+              // Create the updated card object reflecting the new SR data AND the last rating quality
+              Flashcard cardJustRated = originalCardFromState.copyWith(
+                  easinessFactor: srResult.easinessFactor,
+                  interval: srResult.interval,
+                  repetitions: srResult.repetitions,
+                  lastReviewed: () => now,
+                  nextReview: () => nextReviewDate,
+                  lastRatingQuality: () => quality // Make sure this is updated
+              );
+              // Place the updated card back into the list
               updatedCards[cardIndexInList] = cardJustRated;
-              // Pass the state containing the updated cards list to _advanceSession
+
+              // Advance the session using the state that contains the updated card
               _advanceSession(data.copyWith(cards: updatedCards), currentIndex);
-          } else { /* ... handle card not found ... */ print("Warning: Rated card $cardId not found..."); _advanceSession(data, currentIndex); }
-      } catch (e) { /* ... handle error ... */ print("Error persisting SR data for card ID $cardId: $e"); _advanceSession(data, currentIndex); }
+          } else {
+              print("Warning: Rated card $cardId not found in current session list after DB update. Advancing without state update.");
+              _advanceSession(data, currentIndex);
+          }
+      } catch (e) { print("Error persisting SR data for card ID $cardId: $e"); _advanceSession(data, currentIndex); }
    }
 
 
    // deleteCard remains the same
-   Future<void> deleteCard(Flashcard cardToDelete) async { /* ... */ if (cardToDelete.id == null) return; final currentDataAsync = state; if (!currentDataAsync.hasValue || currentDataAsync.value!.sessionComplete) return; final data = currentDataAsync.value!; final cardIndexInList = data.cards.indexWhere((c) => c.id == cardToDelete.id); try { final dbHelper = await ref.read(databaseHelperProvider.future); await dbHelper.deleteFlashcard(cardToDelete.id!); print("Deleted card ID ${cardToDelete.id} from database."); if (cardIndexInList != -1) { _advanceSession(data, cardIndexInList); } else { print("Deleted card was not in list, refreshing study state."); ref.invalidateSelf(); await future; } } catch (e) { print("Error deleting card ID ${cardToDelete.id}: $e"); throw Exception("Error deleting flashcard: $e"); } }
+   Future<void> deleteCard(Flashcard cardToDelete) async { if (cardToDelete.id == null) return; final currentDataAsync = state; if (!currentDataAsync.hasValue || currentDataAsync.value!.sessionComplete) return; final data = currentDataAsync.value!; final cardIndexInList = data.cards.indexWhere((c) => c.id == cardToDelete.id); try { final dbHelper = await ref.read(databaseHelperProvider.future); await dbHelper.deleteFlashcard(cardToDelete.id!); print("Deleted card ID ${cardToDelete.id} from database."); if (cardIndexInList != -1) { _advanceSession(data, cardIndexInList); } else { print("Deleted card was not in list, refreshing study state."); ref.invalidateSelf(); await future; } } catch (e) { print("Error deleting card ID ${cardToDelete.id}: $e"); throw Exception("Error deleting flashcard: $e"); } }
+
+  // *** ADDED: Method to refresh a single card's data ***
+  Future<void> refreshSingleCard(int cardId) async {
+    final currentDataAsync = state;
+    // Ensure we have valid data before proceeding
+    if (!currentDataAsync.hasValue || currentDataAsync.value!.sessionComplete) {
+        print("StudyNotifier: Cannot refresh single card, state is invalid or session complete.");
+        return;
+    }
+    final data = currentDataAsync.value!;
+
+    print("StudyNotifier: Refreshing single card ID: $cardId");
+
+    try {
+      final dbHelper = await ref.read(databaseHelperProvider.future);
+      final persistenceService = await ref.read(persistenceServiceProvider.future); // Needed for checklist state
+
+      // Fetch the latest card data from the database
+      final List<Map<String, dynamic>> maps = await (await dbHelper.database).query(
+         DatabaseHelper.flashcardsTable, // Use constant
+         columns: [ // Explicitly list all columns needed by Flashcard.fromMap
+           'id', 'question', 'answer', 'folderId',
+           'easinessFactor', 'interval', 'repetitions',
+           'lastReviewed', 'nextReview', 'lastRatingQuality'
+         ],
+         where: 'id = ?', // Use actual column name 'id'
+         whereArgs: [cardId],
+         limit: 1,
+      );
+
+      if (maps.isEmpty) {
+        print("  > Card ID $cardId not found in DB during refresh. Maybe deleted during edit?");
+        // If card was somehow deleted, invalidate the whole provider to remove it
+        ref.invalidateSelf();
+        await future;
+        return;
+      }
+
+      final updatedCard = Flashcard.fromMap(maps.first);
+      print("  > Fetched updated card data. Question: '${updatedCard.question.substring(0, min(updatedCard.question.length, 50)).replaceAll('\n', '\\n')}...'");
+
+      // Find the index of this card within the current session's list
+      final indexInState = data.cards.indexWhere((card) => card.id == cardId);
+
+      if (indexInState == -1) {
+        print("  > Card ID $cardId not found in current session state list (length ${data.cards.length}). Perhaps list changed? Invalidating.");
+        // This shouldn't normally happen if the edit was on a card in the current session.
+        // Invalidate as a fallback.
+         ref.invalidateSelf();
+         await future;
+        return;
+      }
+
+      print("  > Card found at index $indexInState in current state list.");
+
+      // Create mutable copies of the state lists to modify safely
+      final updatedCardsList = List<Flashcard>.from(data.cards);
+      final updatedOrderedLinesList = List<List<ParsedAnswerLine>>.from(data.orderedAnswerLinesState);
+      final updatedChecklistItemsList = List<List<ChecklistItem>>.from(data.checklistItemsState); // This list contains sorted sublists
+
+      // --- Update the state lists at the specific index ---
+
+      // 1. Update the Flashcard object
+      updatedCardsList[indexInState] = updatedCard;
+
+      // 2. Re-parse the updated answer content
+      final parseResult = _parseAnswerContent(updatedCard.answer);
+
+      // 3. Update the ordered lines list
+      updatedOrderedLinesList[indexInState] = parseResult.orderedLines;
+
+      // 4. Update the checklist items state list
+      //    a. Load persisted checklist state for the updated card
+      final persistedCheckState = await persistenceService.loadChecklistState(cardId);
+      //    b. Apply persisted state to the newly parsed checklist items
+      List<ChecklistItem> itemsWithState = [];
+       for(final item in parseResult.checklistItems) {
+         itemsWithState.add(item.copyWith(
+           isChecked: persistedCheckState[item.originalIndex] ?? item.isChecked
+         ));
+       }
+      //    c. Sort the checklist items for this card after applying state
+      //    d. Update the list in our state copy
+      updatedChecklistItemsList[indexInState] = _sortChecklist(itemsWithState);
+
+      print("  > Updated card, ordered lines, and checklist state at index $indexInState.");
+
+      // Update the main state using AsyncData.
+      // Crucially, keep the currentPageIndex the same.
+      // Also keep answerShownState, sessionComplete status the same.
+      state = AsyncData(data.copyWith(
+        cards: updatedCardsList,
+        orderedAnswerLinesState: updatedOrderedLinesList,
+        checklistItemsState: updatedChecklistItemsList,
+        // Explicitly DO NOT change these:
+        // currentPageIndex: data.currentPageIndex,
+        // answerShownState: data.answerShownState,
+        // sessionComplete: data.sessionComplete,
+        // currentCardRatingColor: data.currentCardRatingColor, // Let UI handle updates based on new data
+        // currentCardLastRatingQuality: () => updatedCard.lastRatingQuality, // Update this based on fetched data
+      ));
+       print("StudyNotifier: Single card refresh complete for ID: $cardId. State updated.");
+
+    } catch (e, stackTrace) {
+      print("Error refreshing single card ID $cardId: $e\n$stackTrace");
+      // Optionally set error state or re-invalidate on error
+      state = AsyncError(e, stackTrace);
+    }
+  }
+  // *** END ADDED METHOD ***
 }
 
 // Provider Definition remains the same

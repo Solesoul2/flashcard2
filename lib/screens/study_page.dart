@@ -44,9 +44,14 @@ class _StudyPageState extends ConsumerState<StudyPage> {
     final confirm = await showConfirmationDialog( context: context, title: const Text('Confirm Delete'), content: const Text('Delete this flashcard permanently?'), confirmActionText: 'Delete', isDestructiveAction: true );
     if (confirm == true && context.mounted) {
       try {
+        // Use ref.read for actions
         await ref.read(studyProvider(widget.folder.id).notifier).deleteCard(cardToDelete);
+        // Show feedback only if still mounted after async operation
         if (context.mounted) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Flashcard deleted.'))); }
-      } catch (e) { if (context.mounted) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error deleting card: $e'), backgroundColor: Colors.red)); } }
+      } catch (e) {
+        // Show feedback only if still mounted after async operation
+        if (context.mounted) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error deleting card: $e'), backgroundColor: Colors.red)); }
+      }
     }
   }
 
@@ -57,7 +62,10 @@ class _StudyPageState extends ConsumerState<StudyPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Watch the provider state
     final studyStateAsync = ref.watch(studyProvider(widget.folder.id));
+
+    // Determine AppBar Title safely using valueOrNull
     final String appBarTitle = "Study: ${studyStateAsync.valueOrNull?.folderPath.lastOrNull?.name ?? widget.folder.name}";
 
     return Scaffold(
@@ -68,14 +76,17 @@ class _StudyPageState extends ConsumerState<StudyPage> {
           child: Padding( padding: const EdgeInsets.all(16.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.error_outline, color: theme.colorScheme.error, size: 48), const SizedBox(height: 16), Text('Error loading study session:', style: theme.textTheme.titleLarge), const SizedBox(height: 8), Text('$err', style: TextStyle(color: theme.colorScheme.error), textAlign: TextAlign.center), const SizedBox(height: 24), ElevatedButton.icon( icon: const Icon(Icons.refresh), label: const Text('Retry'), onPressed: () => ref.invalidate(studyProvider(widget.folder.id)), ) ], ), ),
         ),
         data: (studyData) {
+          // Handle Session Complete state
           if (studyData.sessionComplete) { /* Session Complete UI remains the same */
               return Center( child: Padding( padding: const EdgeInsets.all(20.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.check_circle_outline, color: theme.colorScheme.primary, size: 64), const SizedBox(height: 24), Text( 'Study session complete!', style: theme.textTheme.headlineSmall, textAlign: TextAlign.center, ), const SizedBox(height: 16), Text( 'You have reviewed all due cards for this session.', style: theme.textTheme.bodyLarge, textAlign: TextAlign.center, ), const SizedBox(height: 32), ElevatedButton.icon( icon: const Icon(Icons.arrow_back), label: const Text('Go Back'), onPressed: () { if (Navigator.canPop(context)) { Navigator.pop(context); } }, ) ], ) ) );
           }
+          // Handle No Cards state
           if (studyData.cards.isEmpty) { /* No Cards UI remains the same */
             return Center( child: Padding( padding: const EdgeInsets.all(20.0), child: Text( 'This folder has no flashcards to study.\nAdd some cards first, or go back.', textAlign: TextAlign.center, style: theme.textTheme.titleMedium?.copyWith(color: Colors.grey[600]), ), ) );
           }
 
           final int currentIndex = studyData.currentPageIndex;
+          // Handle Invalid Index state (defensive check)
           if (currentIndex < 0 || currentIndex >= studyData.cards.length) { /* Invalid Index UI remains the same */
              print("Error: Invalid current index ($currentIndex) despite session not being complete.");
              return Center( child: Padding( padding: const EdgeInsets.all(16.0), child: Column( mainAxisAlignment: MainAxisAlignment.center, children: [ Icon(Icons.error_outline, color: theme.colorScheme.error, size: 48), const SizedBox(height: 16), Text('Internal Error: Invalid card index.', style: theme.textTheme.titleLarge), const SizedBox(height: 24), ElevatedButton.icon( icon: const Icon(Icons.arrow_back), label: const Text('Go Back'), onPressed: () { if (Navigator.canPop(context)) { Navigator.pop(context); } }, ) ], ), ), );
@@ -89,7 +100,9 @@ class _StudyPageState extends ConsumerState<StudyPage> {
           final List<ChecklistItem> currentChecklistItemsState = studyData.currentChecklistItems;
           // *** End state property changes ***
 
-          final Color liveRatingColor = studyData.currentCardRatingColor == const Color(0xFFbdbdbd) ? _notRatedColor : studyData.currentCardRatingColor;
+          final Color liveRatingColor = studyData.currentCardRatingColor == const Color(0xFFbdbdbd) /* Grey sentinel */
+                                        ? _notRatedColor
+                                        : studyData.currentCardRatingColor;
           final int? lastQuality = studyData.currentCardLastRatingQuality;
           final bool canPressSubmit = isCurrentAnswerShown;
 
@@ -110,27 +123,44 @@ class _StudyPageState extends ConsumerState<StudyPage> {
             children: [
               Expanded( // InteractiveStudyCard
                 child: InteractiveStudyCard(
-                  key: ValueKey('study_card_${currentCard.id}_${studyData.cards.length}_$currentIndex'),
+                  // Using ValueKey with card ID and index ensures widget rebuilds when card changes
+                  key: ValueKey('study_card_${currentCard.id}_$currentIndex'),
                   flashcard: currentCard,
                   folder: widget.folder,
                   folderPath: studyData.folderPath,
-                  currentCardIndex: currentIndex + 1,
+                  currentCardIndex: currentIndex + 1, // Display 1-based index
                   totalCardCount: studyData.cards.length,
                   isAnswerShown: isCurrentAnswerShown,
-                  // *** Pass the new state properties ***
+                  // Pass the new state properties
                   orderedAnswerLines: currentOrderedAnswerLines,
                   checklistItemsState: currentChecklistItemsState,
-                  // answerMarkdownContent: currentAnswerMarkdown, // REMOVED
-                  // *** End passing new properties ***
+                  // Pass last known rating quality for initial display consistency
                   lastRatingQuality: lastQuality,
+                  // Callbacks for interaction
                   onChecklistChanged: (itemIndex, isChecked) => ref.read(studyProvider(widget.folder.id).notifier).handleChecklistChanged(itemIndex, isChecked),
                   onRatingColorCalculated: (id, color) { ref.read(studyProvider(widget.folder.id).notifier).updateRatingColor(id, color); },
                   onDelete: () => _handleDeleteCard(context, currentCard),
+                  // *** MODIFIED: Update the onEditComplete callback ***
+                  onEditComplete: () async {
+                      final cardIdToRefresh = currentCard.id;
+                      if (cardIdToRefresh != null) {
+                         print("Edit complete detected in StudyPage, refreshing card ID: $cardIdToRefresh");
+                         // Call the new notifier method to refresh just this card's data
+                         // Use ref.read for calling actions/methods on the notifier
+                         await ref.read(studyProvider(widget.folder.id).notifier).refreshSingleCard(cardIdToRefresh);
+                      } else {
+                         // Fallback: Invalidate if card ID is somehow null (shouldn't happen)
+                         print("Edit complete detected but card ID is null, invalidating provider as fallback.");
+                         ref.invalidate(studyProvider(widget.folder.id));
+                      }
+                  },
+                  // *** END MODIFICATION ***
                 ),
               ),
               SafeArea( // Footer Buttons (remain the same)
                 top: false, left: false, right: false,
-                child: Padding( padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Column( crossAxisAlignment: CrossAxisAlignment.stretch, children: [ revealHideButton, const SizedBox(height: 8), Visibility( visible: isCurrentAnswerShown, maintainState: true, maintainAnimation: true, maintainSize: true, child: Row( children: [ Expanded( child: OutlinedButton( onPressed: () => _handleSkip(ref), style: OutlinedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0) ), child: const Text('SKIP'), ), ), const SizedBox(width: 8), Expanded( child: ElevatedButton( onPressed: canPressSubmit ? () => _handleSubmitScore(ref) : null, style: ElevatedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0), backgroundColor: submitButtonBackgroundColor, foregroundColor: submitButtonForegroundColor, ), child: const Text('SUBMIT SCORE'), ), ), ], ), ), if (!isCurrentAnswerShown) const SizedBox(height: 48), ], ), ),
+                child: Padding( padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Column( crossAxisAlignment: CrossAxisAlignment.stretch, children: [ revealHideButton, const SizedBox(height: 8), Visibility( visible: isCurrentAnswerShown, maintainState: true, maintainAnimation: true, maintainSize: true, child: Row( children: [ Expanded( child: OutlinedButton( onPressed: () => _handleSkip(ref), style: OutlinedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0) ), child: const Text('SKIP'), ), ), const SizedBox(width: 8), Expanded( child: ElevatedButton( onPressed: canPressSubmit ? () => _handleSubmitScore(ref) : null, style: ElevatedButton.styleFrom( padding: const EdgeInsets.symmetric(vertical: 10.0), backgroundColor: submitButtonBackgroundColor, foregroundColor: submitButtonForegroundColor, ), child: const Text('SUBMIT SCORE'), ), ), ], ), ), if (!isCurrentAnswerShown) const SizedBox(height: 48), // Placeholder for height consistency
+                 ], ), ),
               ), // End SafeArea
             ],
           );

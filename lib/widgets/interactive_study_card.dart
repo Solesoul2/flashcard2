@@ -3,7 +3,6 @@ import 'dart:math' show max;
 import 'dart:ui' show lerpDouble;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-// *** ADDED: Import for listEquals ***
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter_markdown/flutter_markdown.dart'; // Still needed for Answer section
 
@@ -19,6 +18,19 @@ class ChecklistItem {
   final int originalIndex; final String text; bool isChecked;
   ChecklistItem({ required this.originalIndex, required this.text, this.isChecked = false });
   ChecklistItem copyWith({ bool? isChecked }) { return ChecklistItem( originalIndex: originalIndex, text: text, isChecked: isChecked ?? this.isChecked ); }
+
+  // Add equality operators for didUpdateWidget comparison if needed
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ChecklistItem &&
+          runtimeType == other.runtimeType &&
+          originalIndex == other.originalIndex &&
+          text == other.text &&
+          isChecked == other.isChecked;
+
+  @override
+  int get hashCode => originalIndex.hashCode ^ text.hashCode ^ isChecked.hashCode;
 }
 
 /// Displays a single flashcard during a study session. Focuses on rendering UI
@@ -33,13 +45,15 @@ class InteractiveStudyCard extends StatefulWidget {
   final bool isAnswerShown;
   // Accept new ordered list and separate checklist state
   final List<ParsedAnswerLine> orderedAnswerLines; // NEW: Combined list for rendering order
-  final List<ChecklistItem> checklistItemsState; // Keep for managing checked status
+  final List<ChecklistItem> checklistItemsState; // Contains ALL checklist items for this card, managed by notifier
   final int? lastRatingQuality;
 
-  // Callbacks remain the same
+  // Callbacks
   final VoidCallback onDelete;
   final Function(int itemOriginalIndex, bool isChecked) onChecklistChanged;
   final Function(int? cardId, Color color)? onRatingColorCalculated;
+  // *** ADDED: Callback for when editing is complete ***
+  final Future<void> Function()? onEditComplete;
 
   // Constants remain the same
   static const Color notRatedColor = Color(0xFF78909C);
@@ -51,7 +65,9 @@ class InteractiveStudyCard extends StatefulWidget {
     required this.orderedAnswerLines, // NEW
     required this.checklistItemsState, // Keep for state
     required this.onDelete, required this.onChecklistChanged,
-    this.onRatingColorCalculated, this.lastRatingQuality,
+    this.onRatingColorCalculated,
+    this.lastRatingQuality,
+    this.onEditComplete, // *** ADDED: Include in constructor ***
     Key? key,
   }) : super(key: key);
 
@@ -68,71 +84,212 @@ class _InteractiveStudyCardState extends State<InteractiveStudyCard> {
   @override
   void initState() { super.initState(); WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) { _reportCurrentLiveRatingColor(); } }); }
 
-  // didUpdateWidget with listEquals (now imported)
+  // didUpdateWidget checks if checklistItemsState changed using listEquals
   @override
   void didUpdateWidget(covariant InteractiveStudyCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Check if checklist *state* changed
-    bool checklistStateChanged = widget.checklistItemsState.length != oldWidget.checklistItemsState.length ||
-                                 !listEquals(widget.checklistItemsState.map((e) => e.isChecked).toList(),
-                                              oldWidget.checklistItemsState.map((e) => e.isChecked).toList());
+    // Check if the actual checklist state list changed (content or order might change)
+    bool checklistStateListChanged = !listEquals(widget.checklistItemsState, oldWidget.checklistItemsState);
 
-    bool orderedLinesChanged = widget.orderedAnswerLines.length != oldWidget.orderedAnswerLines.length;
+    // Also check if the rendering order list changed
+    bool orderedLinesChanged = !listEquals(widget.orderedAnswerLines, oldWidget.orderedAnswerLines);
 
-    if (widget.isAnswerShown != oldWidget.isAnswerShown || checklistStateChanged || orderedLinesChanged || widget.flashcard.id != oldWidget.flashcard.id || widget.lastRatingQuality != oldWidget.lastRatingQuality) {
+    if (widget.isAnswerShown != oldWidget.isAnswerShown ||
+        checklistStateListChanged || // Use the new check
+        orderedLinesChanged ||
+        widget.flashcard.id != oldWidget.flashcard.id ||
+        widget.lastRatingQuality != oldWidget.lastRatingQuality) {
       SchedulerBinding.instance.addPostFrameCallback((_) {
          if (mounted) { _reportCurrentLiveRatingColor(); }
       });
     }
   }
 
-  // Calculation methods now use checklistItemsState
+
+  // Calculation methods now use checklistItemsState (remain the same functionally)
   double _calculateChecklistCompletion() { if (widget.checklistItemsState.isEmpty) return 0.0; final checkedCount = widget.checklistItemsState.where((item) => item.isChecked).length; return checkedCount / widget.checklistItemsState.length; }
   bool _isChecklistRated() { return widget.checklistItemsState.any((item) => item.isChecked); }
   Color _getLiveRatingColorBasedOnChecks() { if (widget.checklistItemsState.isNotEmpty && !_isChecklistRated()) { return InteractiveStudyCard.notRatedColor; } if (widget.checklistItemsState.isEmpty) { return InteractiveStudyCard.notRatedColor; } final percentage = _calculateChecklistCompletion(); final clampedPercentage = percentage.clamp(0.0, 1.0); for (int i = 0; i < _progressGradientStops.length - 1; i++) { final stop1 = _progressGradientStops[i]; final stop2 = _progressGradientStops[i + 1]; if (clampedPercentage >= stop1 && clampedPercentage <= stop2) { final range = stop2 - stop1; final t = range == 0.0 ? 0.0 : (clampedPercentage - stop1) / range; final color1 = _progressGradientColors[i]; final color2 = _progressGradientColors[i + 1]; return Color.lerp(color1, color2, t) ?? _progressGradientColors.last; } } return _progressGradientColors.last; }
-  void _reportCurrentLiveRatingColor() { final calculatedLiveColor = _getLiveRatingColorBasedOnChecks(); if (calculatedLiveColor != _lastReportedColor) { _lastReportedColor = calculatedLiveColor; SchedulerBinding.instance.addPostFrameCallback((_) { if (mounted && widget.onRatingColorCalculated != null) { widget.onRatingColorCalculated!(widget.flashcard.id, calculatedLiveColor); } }); } else { SchedulerBinding.instance.addPostFrameCallback((_) { if (mounted && widget.onRatingColorCalculated != null) { widget.onRatingColorCalculated!(widget.flashcard.id, calculatedLiveColor); } }); } }
+  void _reportCurrentLiveRatingColor() { final calculatedLiveColor = _getLiveRatingColorBasedOnChecks(); if (calculatedLiveColor != _lastReportedColor) { _lastReportedColor = calculatedLiveColor; SchedulerBinding.instance.addPostFrameCallback((_) { if (mounted && widget.onRatingColorCalculated != null) { widget.onRatingColorCalculated!(widget.flashcard.id, calculatedLiveColor); } }); } else { /* No need to report if color hasn't changed, but the logic in didUpdateWidget might still call this. Let's remove the redundant report */ } }
 
-  // Action Handlers (_handleCheckboxChanged, _navigateToEdit) remain the same
+  // Action Handler for Checkbox
   void _handleCheckboxChanged(int itemOriginalIndex, bool? newValue) { if (newValue == null) return; widget.onChecklistChanged(itemOriginalIndex, newValue); }
-  Future<void> _navigateToEdit() async { if (widget.flashcard.id == null) return; final currentContext = context; if (!mounted) return; await Navigator.push( currentContext, MaterialPageRoute( builder: (_) => FlashcardEditPage( folder: widget.folder, flashcard: widget.flashcard, ), ), ); }
 
-  // Build Helpers (_buildFolderPathString, _buildChecklistItemWidget) remain the same
+  // *** MODIFIED: _navigateToEdit ***
+  // Now awaits the result and calls onEditComplete if successful
+  Future<void> _navigateToEdit() async {
+    if (widget.flashcard.id == null) return;
+    final currentContext = context; // Capture context before async gap.
+    if (!mounted) return;
+
+    // Await the result from the edit page
+    final result = await Navigator.push(
+      currentContext,
+      MaterialPageRoute(
+        builder: (_) => FlashcardEditPage(
+          folder: widget.folder,
+          flashcard: widget.flashcard,
+        ),
+      ),
+    );
+
+    // If the result is true (save successful), call the callback
+    // Check mounted again after await
+    if (result == true && widget.onEditComplete != null && mounted) {
+        await widget.onEditComplete!();
+    }
+  }
+  // *** END MODIFICATION ***
+
+  // Build Helpers (_buildFolderPathString remains same)
   String _buildFolderPathString() { if (widget.folderPath.isEmpty) return widget.folder.name; final pathNames = widget.folderPath.map((f) => f.name).toList(); if (widget.folderPath.isEmpty || widget.folderPath.last.id != widget.folder.id) { pathNames.add(widget.folder.name); } return pathNames.toSet().toList().join(' > '); }
-  Widget _buildChecklistItemWidget(BuildContext context, ChecklistItem item, TextStyle textStyle) { return Padding( padding: const EdgeInsets.symmetric(vertical: 2.0), child: Row( crossAxisAlignment: CrossAxisAlignment.start, children: [ SizedBox( width: 24, height: 24, child: Checkbox( value: item.isChecked, onChanged: (bool? newValue) => _handleCheckboxChanged(item.originalIndex, newValue), visualDensity: VisualDensity.compact, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap, ), ), const SizedBox(width: 8.0), Expanded( child: Padding( padding: const EdgeInsets.only(top: 1.0), child: MarkdownBody( data: item.text.isEmpty ? "(empty)" : item.text, selectable: true, onTapLink: (text, href, title) => launchUrlHelper(context, href), styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith( p: textStyle, listBulletPadding: EdgeInsets.zero, ), ), ), ), ], ), ); }
 
+  // *** MODIFIED: _buildChecklistItemWidget ***
+  // Applies styling based on item.isChecked
+  Widget _buildChecklistItemWidget(BuildContext context, ChecklistItem item, TextStyle defaultStyle) {
+    final theme = Theme.of(context);
+    // Define styles based on checked state
+    final TextStyle textStyle = item.isChecked
+      ? defaultStyle.copyWith(
+          color: Colors.grey[600], // Grey color when checked
+          decoration: TextDecoration.lineThrough, // Strikethrough when checked
+        )
+      : defaultStyle; // Default style when not checked
 
-  // REWRITTEN: _buildAnswerSection (uses orderedAnswerLines)
-  Widget _buildAnswerSection(BuildContext context) {
-     final theme = Theme.of(context);
-     final bodyLargeStyle = theme.textTheme.bodyLarge ?? const TextStyle();
-     final bodyMediumStyle = theme.textTheme.bodyMedium ?? const TextStyle(); // Style for checklist items
-     final orderedLines = widget.orderedAnswerLines;
-
-     if (orderedLines.isEmpty) { return Container( padding: const EdgeInsets.symmetric(vertical: 8.0), child: Text( "(No answer content provided)", style: theme.textTheme.bodyMedium?.copyWith(color: Colors.grey[600], fontStyle: FontStyle.italic) ), ); }
-
-     return ListView.builder(
-       shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
-       itemCount: orderedLines.length,
-       itemBuilder: (context, index) {
-         final line = orderedLines[index];
-         if (line.type == AnswerLineType.text) {
-           if (line.textContent.trim().isEmpty) { return const SizedBox(height: 8.0); }
-           return Padding( padding: const EdgeInsets.symmetric(vertical: 4.0), child: MarkdownBody( data: line.textContent, selectable: true, onTapLink: (text, href, title) => launchUrlHelper(context, href), styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith( p: bodyLargeStyle, ), ), );
-         } else if (line.type == AnswerLineType.checklist) {
-           final checklistItemState = widget.checklistItemsState.firstWhere( (item) => item.originalIndex == line.originalChecklistIndex, orElse: () => ChecklistItem(originalIndex: -1, text: "Error: State not found") );
-           return _buildChecklistItemWidget(context, checklistItemState, bodyMediumStyle);
-         } else { return const SizedBox.shrink(); }
-       },
-     );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 24,
+            height: 24,
+            child: Checkbox(
+              value: item.isChecked,
+              onChanged: (bool? newValue) => _handleCheckboxChanged(item.originalIndex, newValue),
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              // Optional: Use theme colors for checkbox
+              // activeColor: theme.primaryColor,
+              // checkColor: theme.colorScheme.onPrimary,
+            ),
+          ),
+          const SizedBox(width: 8.0),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 1.0), // Adjust alignment with checkbox
+              child: MarkdownBody(
+                data: item.text.isEmpty ? "(empty)" : item.text,
+                selectable: true,
+                onTapLink: (text, href, title) => launchUrlHelper(context, href),
+                styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+                  p: textStyle, // Apply the conditional text style
+                  listBulletPadding: EdgeInsets.zero, // Avoid extra padding
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
-  // --- Main Build Method --- (Uses Expanded+ListView layout)
+
+  // *** REWRITTEN: _buildAnswerSection ***
+  // Groups consecutive checklist items, sorts them, and applies styling
+  Widget _buildAnswerSection(BuildContext context) {
+    final theme = Theme.of(context);
+    final bodyLargeStyle = theme.textTheme.bodyLarge ?? const TextStyle();
+    final bodyMediumStyle = theme.textTheme.bodyMedium ?? const TextStyle(); // Default for checklist
+    final orderedLines = widget.orderedAnswerLines;
+
+    if (orderedLines.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Text(
+          "(No answer content provided)",
+          style: theme.textTheme.bodyMedium?.copyWith(color: Colors.grey[600], fontStyle: FontStyle.italic),
+        ),
+      );
+    }
+
+    List<Widget> contentWidgets = [];
+    List<ParsedAnswerLine> currentChecklistGroup = [];
+
+    void renderChecklistGroup() {
+      if (currentChecklistGroup.isNotEmpty) {
+        // 1. Get the state objects corresponding to the current group
+        List<ChecklistItem> groupStates = [];
+        for (var line in currentChecklistGroup) {
+          if (line.originalChecklistIndex != null) {
+            // Use firstWhere or provide a fallback if the item might be missing (though it shouldn't be)
+            final stateItem = widget.checklistItemsState.firstWhere(
+                (s) => s.originalIndex == line.originalChecklistIndex,
+                orElse: () {
+                     print("Warning: Checklist state item not found for original index ${line.originalChecklistIndex}");
+                     // Create a temporary item to avoid crashing, but log the issue
+                     return ChecklistItem(originalIndex: line.originalChecklistIndex!, text: line.textContent, isChecked: false);
+                 });
+            groupStates.add(stateItem);
+          }
+        }
+
+        // 2. Sort the state objects (checked items last) - this is now redundant if notifier sorts
+         // groupStates.sort((a, b) {
+         //   if (a.isChecked == b.isChecked) return 0; // Keep original relative order if same state
+         //   return a.isChecked ? 1 : -1; // Checked items go to the end
+         // });
+
+        // 3. Render the checklist items using their state (already sorted by the notifier)
+        for (var sortedItemState in widget.checklistItemsState.where((s) => currentChecklistGroup.any((line) => line.originalChecklistIndex == s.originalIndex))) {
+           contentWidgets.add(_buildChecklistItemWidget(context, sortedItemState, bodyMediumStyle));
+        }
+        currentChecklistGroup.clear();
+      }
+    }
+
+    for (final line in orderedLines) {
+      if (line.type == AnswerLineType.checklist) {
+        currentChecklistGroup.add(line);
+      } else {
+        // Render any pending checklist group first
+        renderChecklistGroup();
+        // Render the text line
+        if (line.textContent.trim().isEmpty) {
+          contentWidgets.add(const SizedBox(height: 8.0)); // Represents empty line spacing
+        } else {
+          contentWidgets.add(
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4.0),
+              child: MarkdownBody(
+                data: line.textContent,
+                selectable: true,
+                onTapLink: (text, href, title) => launchUrlHelper(context, href),
+                styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(p: bodyLargeStyle),
+              ),
+            ),
+          );
+        }
+      }
+    }
+    // Render any remaining checklist group at the end
+    renderChecklistGroup();
+
+    // Use Column instead of ListView.builder as we build all widgets at once
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: contentWidgets,
+    );
+  }
+
+
+  // --- Main Build Method --- (Layout remains the same, uses the new _buildAnswerSection)
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final textTheme = theme.textTheme;
 
-    // Calculation logic for colors and progress bar
+    // Calculation logic for colors and progress bar (remains the same)
     final Color liveRatingColor = _getLiveRatingColorBasedOnChecks(); Color finalTopBarColor; final int? lastQuality = widget.lastRatingQuality; bool lastRatingWasZero = lastQuality != null && lastQuality < 3; if (liveRatingColor == InteractiveStudyCard.notRatedColor && lastRatingWasZero) { finalTopBarColor = InteractiveStudyCard.zeroScoreColor; } else if (liveRatingColor == InteractiveStudyCard.notRatedColor && lastQuality == null) { finalTopBarColor = InteractiveStudyCard.notRatedColor; } else { finalTopBarColor = liveRatingColor; } _reportCurrentLiveRatingColor(); final bool useWhiteTextOnTopBar = finalTopBarColor.computeLuminance() < 0.5; final Color contrastTextColorOnTopBar = useWhiteTextOnTopBar ? Colors.white : Colors.black87;
     final bool shouldShowProgressBar = widget.checklistItemsState.isNotEmpty && (_isChecklistRated() || lastQuality != null); double completionPercentage = _calculateChecklistCompletion(); double progressBarValue = (completionPercentage <= 0.0 && shouldShowProgressBar) ? _minProgressBarValue : completionPercentage;
 
@@ -142,22 +299,25 @@ class _InteractiveStudyCardState extends State<InteractiveStudyCard> {
         clipBehavior: Clip.antiAlias,
         child: Column(
           children: [
-            // Top Bar
+            // Top Bar (remains the same)
             Container( color: finalTopBarColor, padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Row( mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [ Text( 'Card ${widget.currentCardIndex} of ${widget.totalCardCount}', style: textTheme.bodyMedium?.copyWith(color: contrastTextColorOnTopBar), ), Row( mainAxisSize: MainAxisSize.min, children: [ IconButton( icon: Icon(Icons.edit_outlined, color: contrastTextColorOnTopBar), tooltip: 'Edit Flashcard', iconSize: 20.0, constraints: const BoxConstraints(), padding: const EdgeInsets.symmetric(horizontal: 8), onPressed: _navigateToEdit, ), IconButton( icon: Icon(Icons.delete_outline, color: contrastTextColorOnTopBar), tooltip: 'Delete Flashcard', iconSize: 20.0, constraints: const BoxConstraints(), padding: const EdgeInsets.symmetric(horizontal: 8), onPressed: widget.onDelete, ), ], ), ], ), ),
             // Scrollable Middle Section
             Expanded(
-              child: ListView(
+              child: ListView( // Keep ListView for overall scrollability if content overflows
                 padding: const EdgeInsets.all(16.0),
                 children: [
-                  // Folder Path
+                  // Folder Path (remains the same)
                   if (widget.folderPath.isNotEmpty || widget.folder.id != null) Padding( padding: const EdgeInsets.only(bottom: 16.0), child: Text( _buildFolderPathString(), style: textTheme.bodySmall?.copyWith(color: Colors.grey[600]), maxLines: 2, overflow: TextOverflow.ellipsis, ), ),
-                  // Question Area (using Text with bodyMedium)
+                  // Question Area (remains the same)
                   Padding( padding: const EdgeInsets.only(bottom: 16.0), child: Text( widget.flashcard.question.isEmpty ? "(No question)" : widget.flashcard.question, style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500), ), ),
-                  // Divider
+                  // Divider (remains the same)
                   if (widget.isAnswerShown) const Divider(height: 24.0, thickness: 1.0),
-                  // Answer Area (uses the rewritten _buildAnswerSection)
-                  if (widget.isAnswerShown) _buildAnswerSection(context),
-                  // Checklist Progress Bar
+
+                  // *** Answer Area (NOW uses the rewritten _buildAnswerSection) ***
+                  if (widget.isAnswerShown)
+                    _buildAnswerSection(context), // This handles text and sorted checklist
+
+                  // Checklist Progress Bar (remains the same)
                   Visibility( visible: shouldShowProgressBar, child: Padding( padding: const EdgeInsets.only(top: 24.0, bottom: 8.0), child: ClipRRect( borderRadius: BorderRadius.circular(8.0), child: SizedBox( height: 8.0, child: LinearProgressIndicator( value: progressBarValue, valueColor: AlwaysStoppedAnimation<Color>(finalTopBarColor), backgroundColor: theme.colorScheme.surfaceVariant.withOpacity(0.5), ), ), ), ), ),
                 ],
               ),
